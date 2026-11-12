@@ -13,7 +13,7 @@ import time
 import uuid
 
 FORK = 'https://github.com/0xInuarashi/codex-m.git'
-BRANCH = 'codex-m/sol-ultrafast'
+BRANCH = 'main'
 UPSTREAM = 'https://github.com/openai/codex.git'
 BINARIES = ('codex', 'codex-code-mode-host', 'codex-exec-server')
 

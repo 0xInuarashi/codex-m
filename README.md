@@ -4,6 +4,12 @@
 
 The fork installs a separate `codex-m` command and shares your existing Codex authentication and ordinary configuration. Your existing `codex` installation stays available.
 
+## Branches
+
+**`main` is the canonical codex-m branch.** Clone and install from it. The `upstream` remote points to OpenAI's repository; `upstream/main` tracks its original code. The sync workflow merges upstream changes into our `main` while preserving the fork's changes.
+
+`codex-m/sol-ultrafast` is retained as a migration branch for older installed updaters. Updating once through that branch switches future checks to `main`. `upstream-snapshot` preserves the previous upstream-only branch as a historical snapshot.
+
 ## What changes
 
 - **Sub-agent routing:** configure a default model and reasoning effort, plus a service tier that can differ from the main agent's. Role-specific settings remain supported; upstream model/effort inheritance rules still apply to full-history forks.
@@ -37,7 +43,7 @@ source "$HOME/.cargo/env"
 ### 2. Clone the fork and configure upstream
 
 ```bash
-git clone --branch codex-m/sol-ultrafast https://github.com/0xInuarashi/codex-m.git
+git clone --branch main https://github.com/0xInuarashi/codex-m.git
 cd codex-m
 
 git remote add upstream https://github.com/openai/codex.git

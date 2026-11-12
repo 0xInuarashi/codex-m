@@ -18,14 +18,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      FORK_BRANCH: codex-m/sol-ultrafast
+      FORK_BRANCH: main
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       RUST_MIN_STACK: '33554432'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: codex-m/sol-ultrafast
+          ref: main
           fetch-depth: 0
           persist-credentials: false
       - name: Merge upstream without changing the published branch

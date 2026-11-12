@@ -338,6 +338,64 @@ fn standalone_package_layout_keeps_standalone_install_method() -> std::io::Resul
 }
 
 #[test]
+fn fork_package_layout_keeps_standalone_install_method() -> std::io::Result<()> {
+    let codex_home = tempfile::tempdir()?;
+    let package_dir = codex_home
+        .path()
+        .join("packages/codex-m/releases/1.2.3-x86_64-unknown-linux-musl");
+    let bin_dir = package_dir.join(BIN_DIRNAME);
+    let resources_dir = package_dir.join(RESOURCES_DIRNAME);
+    let path_dir = package_dir.join(PATH_DIRNAME);
+    fs::create_dir_all(&bin_dir)?;
+    fs::create_dir_all(&resources_dir)?;
+    fs::create_dir_all(&path_dir)?;
+    fs::write(package_dir.join(PACKAGE_METADATA_FILENAME), "{}")?;
+    let exe_path = bin_dir.join(if cfg!(windows) { "codex.exe" } else { "codex" });
+    fs::write(&exe_path, "")?;
+    fs::write(resources_dir.join(TEST_RESOURCE_NAME), "")?;
+    fs::write(path_dir.join(default_rg_command()), "")?;
+    let canonical_package_dir = AbsolutePathBuf::from_absolute_path(package_dir.canonicalize()?)?;
+    let canonical_bin_dir = AbsolutePathBuf::from_absolute_path(bin_dir.canonicalize()?)?;
+    let canonical_resources_dir =
+        AbsolutePathBuf::from_absolute_path(resources_dir.canonicalize()?)?;
+    let canonical_path_dir = AbsolutePathBuf::from_absolute_path(path_dir.canonicalize()?)?;
+
+    let context = InstallContext::from_exe_with_codex_home(
+        /*is_macos*/ false,
+        /*current_exe*/ Some(&exe_path),
+        /*method_override*/ None,
+        /*codex_home*/ Some(codex_home.path()),
+    );
+    assert_eq!(
+        context,
+        InstallContext {
+            method: InstallMethod::Standalone {
+                release_dir: canonical_package_dir.clone(),
+                resources_dir: Some(canonical_resources_dir.clone()),
+                platform: standalone_platform(),
+            },
+            package_layout: Some(CodexPackageLayout {
+                package_dir: canonical_package_dir,
+                bin_dir: canonical_bin_dir,
+                resources_dir: Some(canonical_resources_dir.clone()),
+                path_dir: Some(canonical_path_dir.clone()),
+            }),
+        }
+    );
+    assert_eq!(
+        context.rg_command(),
+        canonical_path_dir
+            .join(default_rg_command())
+            .into_path_buf()
+    );
+    assert_eq!(
+        context.bundled_resource(TEST_RESOURCE_NAME),
+        Some(canonical_resources_dir.join(TEST_RESOURCE_NAME))
+    );
+    Ok(())
+}
+
+#[test]
 fn npm_managed_package_keeps_package_layout() -> std::io::Result<()> {
     let package_dir = tempfile::tempdir()?;
     let bin_dir = package_dir.path().join(BIN_DIRNAME);

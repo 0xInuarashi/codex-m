@@ -756,7 +756,7 @@ cleanup_stale_install_artifacts() {
   find "$STANDALONE_ROOT" -mindepth 1 -maxdepth 1 -name '.current.*' -exec rm -f {} +
 
   if [ "$DAEMON_ONLY" != "1" ] && [ -d "$BIN_DIR" ]; then
-    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.codex.*' -exec rm -f {} +
+    find "$BIN_DIR" -mindepth 1 -maxdepth 1 -name '.codex-m.*' -exec rm -f {} +
   fi
 }
 
@@ -1477,6 +1477,24 @@ if [ "$DAEMON_ONLY" = "1" ]; then
   exit 0
 fi
 update_visible_command "$release_dir"
+mkdir -p "$HOME/.config/codex-m"
+if [ ! -e "$HOME/.config/codex-m/config.toml" ]; then
+  # Noclobber preserves settings if another process creates the file concurrently.
+  (set -C; cat > "$HOME/.config/codex-m/config.toml" <<'CODEX_M_DEFAULTS'
+# codex-m-specific defaults. The installed codex keeps using its own defaults.
+service_tier = "fast"
+[agents]
+default_subagent_model = "gpt-6.1-sol"
+default_subagent_reasoning_effort = "medium"
+
+[model_routing]
+subagent_service_tier = "ultrafast"
+compaction_model = "gpt-6.1-sol"
+compaction_service_tier = "ultrafast"
+compaction_reasoning_effort = "medium"
+CODEX_M_DEFAULTS
+  ) || [ -e "$HOME/.config/codex-m/config.toml" ]
+fi
 add_to_path
 verify_visible_command
 if ! prune_standalone_releases; then

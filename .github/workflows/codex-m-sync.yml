@@ -67,7 +67,9 @@ jobs:
           # New upstream workspace crates inherit codex-m's package version.
           # Preserve already-locked external dependencies while updating workspace entries.
           cargo update --workspace
-          git add Cargo.lock
+          python3 ../scripts/generate-codex-m-installer.py
+          python3 -m unittest discover -s ../scripts -p test_codex_m_installer.py
+          git add Cargo.lock ../install.sh
           if ! git diff --cached --quiet; then
             git commit -m 'Refresh fork workspace lockfile after upstream merge'
           fi

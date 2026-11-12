@@ -23,9 +23,12 @@ class ForkInstallerTest(unittest.TestCase):
             installed_bin.mkdir()
             official = installed_bin / 'codex'
             official.write_text('official installation')
+            official_temporary = installed_bin / '.codex.1234'
+            official_temporary.write_text('official updater staging')
             result, requests = namespace['run_installer_in'](path, 'latest', metadata_json=metadata, archive_path=archive, checksum_path=checksum)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(official.read_text(), 'official installation')
+            self.assertTrue(official_temporary.exists())
             installed = installed_bin / 'codex-m'
             self.assertTrue(installed.is_symlink())
             self.assertIn('/packages/codex-m/', str(installed.resolve()))

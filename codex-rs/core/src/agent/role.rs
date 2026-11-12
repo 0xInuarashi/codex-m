@@ -74,10 +74,6 @@ async fn apply_role_to_config_inner(
     };
     let role_layer_toml = load_role_layer_toml(config, config_file, is_built_in, role_name).await?;
     let role_config = deserialize_config_toml_with_base(role_layer_toml, &config.codex_home)?;
-    // In codex-m independent routing mode, an explicit role tier overrides the default.
-    if config.model_routing.subagent_service_tier.is_some() && role_config.service_tier.is_some() {
-        config.model_routing.subagent_service_tier = role_config.service_tier.clone();
-    }
     let mut overrides = AgentRoleOverrides {
         developer_instructions: role_config.developer_instructions,
         model: role_config.model,
@@ -203,6 +199,13 @@ mod role_overrides {
             next_config.personality = Some(personality);
         }
         if let Some(service_tier) = &overrides.service_tier {
+            if next_config.model_routing.subagent_service_tier.is_some() {
+                next_config.agent_role_service_tier =
+                    Some(ServiceTier::from_request_value(service_tier).map_or_else(
+                        || service_tier.clone(),
+                        |tier| tier.request_value().to_string(),
+                    ));
+            }
             next_config.service_tier = match ServiceTier::from_request_value(service_tier) {
                 Some(ServiceTier::Fast) => next_config
                     .features

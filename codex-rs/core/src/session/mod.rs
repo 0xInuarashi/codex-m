@@ -4316,8 +4316,15 @@ impl Session {
             )
         };
         if self.inherits_root_service_tier(&turn_context.session_source) {
-            let root_service_tier = if let Some(tier) =
-                &turn_context.config.model_routing.subagent_service_tier
+            let root_service_tier = if let Some(tier) = turn_context
+                .config
+                .agent_role_service_tier
+                .as_ref()
+                .or(turn_context
+                    .config
+                    .model_routing
+                    .subagent_service_tier
+                    .as_ref())
             {
                 Some(tier.clone())
             } else {

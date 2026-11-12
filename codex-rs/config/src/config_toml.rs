@@ -1216,6 +1216,24 @@ pub struct ModelRoutingToml {
     pub compaction_reasoning_effort: Option<ReasoningEffort>,
 }
 
+impl ModelRoutingToml {
+    /// Keep legacy tier aliases consistent with the ordinary service_tier setting.
+    pub fn normalized(mut self) -> Self {
+        for tier in [
+            &mut self.subagent_service_tier,
+            &mut self.compaction_service_tier,
+        ] {
+            if let Some(parsed) = tier
+                .as_deref()
+                .and_then(codex_protocol::config_types::ServiceTier::from_request_value)
+            {
+                *tier = Some(parsed.request_value().to_string());
+            }
+        }
+        self
+    }
+}
+
 #[cfg(test)]
 mod model_routing_tests {
     use super::*;
@@ -1236,6 +1254,26 @@ compaction_service_tier = "ultrafast"
         let routing = configured.model_routing.unwrap();
         assert_eq!(routing.subagent_service_tier.as_deref(), Some("ultrafast"));
         assert_eq!(routing.compaction_model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(
+            routing.compaction_service_tier.as_deref(),
+            Some("ultrafast")
+        );
+    }
+}
+
+#[cfg(test)]
+mod model_routing_normalization_tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_fast_alias_without_changing_catalog_tiers() {
+        let routing = ModelRoutingToml {
+            subagent_service_tier: Some("fast".to_string()),
+            compaction_service_tier: Some("ultrafast".to_string()),
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(routing.subagent_service_tier.as_deref(), Some("priority"));
         assert_eq!(
             routing.compaction_service_tier.as_deref(),
             Some("ultrafast")

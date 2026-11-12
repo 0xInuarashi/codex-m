@@ -94,7 +94,11 @@ pub(crate) async fn prepare_agent_spawn_config(
     if shares_service_tier {
         apply_spawn_agent_service_tier(session, &mut config).await?;
     }
-    if let Some(tier) = &config.model_routing.subagent_service_tier {
+    if let Some(tier) = config
+        .agent_role_service_tier
+        .as_ref()
+        .or(config.model_routing.subagent_service_tier.as_ref())
+    {
         config.service_tier = Some(tier.clone());
     }
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
@@ -147,6 +151,7 @@ pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, St
 fn build_agent_shared_config(turn: &TurnContext) -> Result<Config, String> {
     let base_config = turn.config.clone();
     let mut config = (*base_config).clone();
+    config.agent_role_service_tier = None;
     if config
         .features
         .enabled(Feature::SubagentDefaultContextLimits)

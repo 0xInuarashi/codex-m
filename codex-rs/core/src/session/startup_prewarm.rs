@@ -344,10 +344,15 @@ async fn schedule_startup_prewarm_inner(
         session.inherits_root_service_tier(&startup_turn_context.session_source);
     let preconnect_service_tier = if inherits_root_service_tier {
         crate::session::get_service_tier(
-            if let Some(tier) = &startup_turn_context
+            if let Some(tier) = startup_turn_context
                 .config
-                .model_routing
-                .subagent_service_tier
+                .agent_role_service_tier
+                .as_ref()
+                .or(startup_turn_context
+                    .config
+                    .model_routing
+                    .subagent_service_tier
+                    .as_ref())
             {
                 Some(tier.clone())
             } else {

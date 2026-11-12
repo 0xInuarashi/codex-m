@@ -852,8 +852,9 @@ service_tier = "priority"
 
     assert_eq!(
         config.model_routing.subagent_service_tier.as_deref(),
-        Some("priority")
+        Some("ultrafast")
     );
+    assert_eq!(config.agent_role_service_tier.as_deref(), Some("priority"));
     assert_eq!(
         config.service_tier,
         Some(ServiceTier::Fast.request_value().to_string())

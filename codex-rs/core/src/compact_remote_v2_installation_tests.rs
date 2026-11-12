@@ -18,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Copy)]
 enum HistoryChange {
+    Unchanged,
     Replacement,
     Account,
 }
@@ -46,6 +47,7 @@ impl AgentSessionReader for FailingRosterRead {
     }
 }
 
+#[test_case(HistoryChange::Unchanged, CompactionFallback::Skip; "compaction_routing preserves producer hash")]
 #[test_case(HistoryChange::Replacement, CompactionFallback::Skip; "replacement optional")]
 #[test_case(HistoryChange::Account, CompactionFallback::Skip; "account optional")]
 #[test_case(HistoryChange::Replacement, CompactionFallback::Foreground; "replacement required")]
@@ -101,7 +103,7 @@ async fn prepared_prefix_rejection_respects_caller_intent(
         generation: history.history_version(),
         len: history.annotated_items().len(),
         auth_owner: match change {
-            HistoryChange::Replacement => auth,
+            HistoryChange::Replacement | HistoryChange::Unchanged => auth,
             HistoryChange::Account => Some(
                 codex_login::AuthManager::from_auth_for_testing_with_home(
                     CodexAuth::from_api_key("other-account"),
@@ -129,7 +131,7 @@ async fn prepared_prefix_rejection_respects_caller_intent(
         model_info: Arc::clone(&step.settings.model_info),
         cutoff_world_state: Arc::new(cutoff_world_state),
         attempt: RemoteCompactV2Attempt {
-            compaction_model_hash: step.settings.model_info.comp_hash.clone(),
+            compaction_model_hash: Some("compactor-producer-hash".to_string()),
             rejected_audio_file_ids: Default::default(),
             input_goal_ids: Default::default(),
             trace_input_history: None,
@@ -191,6 +193,24 @@ async fn prepared_prefix_rejection_respects_caller_intent(
     let installed = compaction
         .await
         .expect("reject stale result without failing compaction");
+    if matches!(change, HistoryChange::Unchanged) {
+        assert!(installed);
+        assert_eq!(requests.requests().len(), 0);
+        let after = sess.clone_history().await;
+        let checkpoint = after
+            .annotated_items()
+            .iter()
+            .find(|item| matches!(item.item, ResponseItem::Compaction { .. }))
+            .expect("installed checkpoint");
+        assert_eq!(
+            checkpoint
+                .metadata
+                .as_ref()
+                .and_then(|m| m.compaction_model_hash.as_deref()),
+            Some("compactor-producer-hash")
+        );
+        return;
+    }
     // The foreground response has no usage; stale candidate statistics must not leak.
     assert_eq!(
         (

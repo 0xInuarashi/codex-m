@@ -9,7 +9,32 @@ import tomllib
 home = Path.home()
 config_path = home / '.config/codex-m/config.toml'
 config = tomllib.loads(config_path.read_text()) if config_path.exists() else {}
-binary = home / '.local/lib/codex-m/codex'
+install_root = home / '.local/lib/codex-m'
+current = install_root / 'current'
+sys.path.insert(0, str(current if current.exists() else Path(__file__).resolve().parent))
+if sys.argv[1:2] == ['update']:
+    import codex_m_updates
+    sys.argv.pop(1)
+    sys.exit(codex_m_updates.main())
+# Keep protocol/exec invocations quiet. Interactive launches can offer the fork updater.
+upstream_config = Path(os.environ.get('CODEX_HOME', str(home / '.codex'))) / 'config.toml'
+try:
+    check_enabled = tomllib.loads(upstream_config.read_text()).get('check_for_update_on_startup', True)
+except (OSError, ValueError):
+    check_enabled = True
+check_enabled = config.get('check_for_update_on_startup', check_enabled)
+for index, argument in enumerate(sys.argv[1:], 1):
+    override = None
+    if argument in ('-c', '--config') and index + 1 < len(sys.argv):
+        override = sys.argv[index + 1]
+    elif argument.startswith('--config='):
+        override = argument.removeprefix('--config=')
+    if override and override.partition('=')[0].strip() == 'check_for_update_on_startup':
+        check_enabled = tomllib.loads(override)['check_for_update_on_startup']
+if (not sys.argv[1:] or sys.argv[1] in ('resume', 'fork')) and check_enabled:
+    import codex_m_updates
+    codex_m_updates.startup_notice()
+binary = (current if current.exists() else install_root) / 'codex'
 if not binary.is_file():
     sys.exit(f'codex-m binary is not installed: {binary}')
 # Explicit CLI overrides appear last and therefore override these defaults.
@@ -21,7 +46,9 @@ def flatten(table, prefix=''):
         else:
             yield '-c'
             yield f'{name}={json.dumps(value, ensure_ascii=False)}'
-args = [str(binary), *flatten(config), *sys.argv[1:]]
+# The launcher owns fork updates, including in development builds.
+args = [str(binary), *flatten(config), '-c', 'check_for_update_on_startup=false', *sys.argv[1:]]
 if Path.cwd() == home and not any(a in ('-C', '--cd') or a.startswith('--cd=') for a in sys.argv[1:]):
-    os.chdir('/repos')
+    if Path('/repos').is_dir():
+        os.chdir('/repos')
 os.execv(binary, args)

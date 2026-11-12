@@ -130,6 +130,7 @@ async fn build_and_install_compaction(
             compaction_metadata,
             analytics_details,
             RemoteCompactV2AttemptInput::Foreground(client_session.as_deref_mut()),
+            /*apply_model_routing*/ true,
         )
         .await;
         let (attempt, compaction_turn_context) = match attempt {
@@ -155,6 +156,7 @@ async fn build_and_install_compaction(
                     compaction_metadata,
                     analytics_details,
                     RemoteCompactV2AttemptInput::Foreground(client_session),
+                    /*apply_model_routing*/ false,
                 )
                 .await;
                 record_model_fallback(
@@ -205,7 +207,9 @@ async fn build_and_install_compaction(
         crate::session::file_audio::snapshot(sess).await.as_ref(),
     );
     let reviewer_compaction_hash = reviewer_compaction_hash(sess, turn_context).await;
-    let installed = if let Some((prefix, model_info, cutoff_world_state)) = prefix {
+    let installed = if let Some((prefix, mut model_info, cutoff_world_state)) = prefix {
+        // Admission uses the foreground model; the encrypted checkpoint belongs to its producer.
+        Arc::make_mut(&mut model_info).comp_hash = compaction_model_hash.clone();
         let (initial_context, world_state_baseline) = sess
             .build_initial_context_with_world_state(replacement_step_context, &cutoff_world_state)
             .await;

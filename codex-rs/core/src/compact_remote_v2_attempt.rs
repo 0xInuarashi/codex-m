@@ -80,8 +80,14 @@ pub(super) async fn run_remote_compact_v2_attempt(
     compaction_metadata: CompactionTurnMetadata,
     analytics_details: &mut CompactionAnalyticsDetails,
     input: RemoteCompactV2AttemptInput<'_>,
+    apply_model_routing: bool,
 ) -> CodexResult<RemoteCompactV2Attempt> {
-    let routed_step = Arc::new(step_context.for_compaction(sess).await);
+    let routed_step = if apply_model_routing {
+        Arc::new(step_context.for_compaction(sess).await)
+    } else {
+        // Previous-model failure recovery must really use the replacement model.
+        Arc::clone(step_context)
+    };
     let step_context = &routed_step;
     let turn_context = &step_context.turn;
     let mut owned_client_session = None;
@@ -361,6 +367,7 @@ pub(crate) async fn run_background_compaction(
         metadata,
         &mut CompactionAnalyticsDetails::default(),
         RemoteCompactV2AttemptInput::Background(prepared_input),
+        /*apply_model_routing*/ true,
     )
     .await?;
     Ok(BackgroundCompactionCandidate {

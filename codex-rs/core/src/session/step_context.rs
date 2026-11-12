@@ -66,7 +66,10 @@ impl StepContext {
         {
             return self.clone();
         }
-        let turn = self.turn.for_compaction(session).await;
+        let turn = self
+            .turn
+            .for_compaction_with_settings(session, &self.settings)
+            .await;
         let settings = Arc::clone(&turn.initial_settings);
         let mut result = self.clone();
         result.session_telemetry = settings.telemetry(&self.session_telemetry);

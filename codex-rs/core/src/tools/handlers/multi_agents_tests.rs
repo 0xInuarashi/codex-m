@@ -4851,3 +4851,20 @@ async fn multi_agent_v2_full_history_fork_uses_independent_service_tier() {
         Some(ServiceTier::Fast.request_value().to_string())
     );
 }
+
+#[tokio::test]
+async fn independent_service_tier_role_does_not_become_descendant_default() {
+    let (session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.model_routing.subagent_service_tier = Some("ultrafast".to_string());
+    config.agent_role_service_tier = Some("priority".to_string());
+    set_turn_config(&mut turn, config);
+    let step = StepContext::for_test(Arc::new(turn));
+    let child = build_agent_spawn_config(&session.get_base_instructions().await, &step)
+        .expect("child config should build");
+    assert_eq!(child.agent_role_service_tier, None);
+    assert_eq!(
+        child.model_routing.subagent_service_tier.as_deref(),
+        Some("ultrafast")
+    );
+}

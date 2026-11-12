@@ -953,3 +953,27 @@ async fn configured_compaction_model_does_not_change_main_model() {
     assert_eq!(turn.model_info().slug, original_model);
     assert_eq!(turn.initial_settings.service_tier, original_tier);
 }
+
+#[tokio::test]
+async fn compaction_routing_uses_captured_step_instead_of_initial_turn() {
+    let (session, turn, _events) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        |config| {
+            config.model = Some("gpt-5.2".to_string());
+            config.model_routing.compaction_service_tier = Some("priority".to_string());
+        },
+    )
+    .await;
+    let changed = turn
+        .with_model("gpt-5.5".to_string(), &session.services.models_manager)
+        .await;
+    let mut step = StepContext::for_test(Arc::clone(&turn));
+    Arc::make_mut(&mut step).settings = Arc::clone(&changed.initial_settings);
+    let routed = step.for_compaction(&session).await;
+    assert_eq!(routed.settings.model_info.slug, "gpt-5.5");
+    assert_eq!(routed.turn.model_info().slug, "gpt-5.5");
+    assert_eq!(routed.turn.capture_current_model_info().slug, "gpt-5.5");
+    assert_eq!(turn.model_info().slug, "gpt-5.2");
+    assert_eq!(step.settings.model_info.slug, "gpt-5.5");
+}

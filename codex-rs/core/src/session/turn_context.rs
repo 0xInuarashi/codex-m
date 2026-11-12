@@ -834,35 +834,61 @@ impl TurnContext {
             && self.config.orchestrator_mcp_enabled
     }
 
-    /// Resolve a separate compaction request without changing the live thread model.
+    /// Resolve compaction from the caller's captured settings, never a newer live step.
     pub(crate) async fn for_compaction(&self, session: &Session) -> Self {
+        self.for_compaction_with_settings(session, &self.initial_settings)
+            .await
+    }
+
+    pub(super) async fn for_compaction_with_settings(
+        &self,
+        session: &Session,
+        source: &ResolvedStepSettings,
+    ) -> Self {
         let routing = &self.config.model_routing;
         let model = routing
             .compaction_model
             .clone()
-            .unwrap_or_else(|| self.model_info().slug.clone());
+            .unwrap_or_else(|| source.model_info.slug.clone());
         let mut turn = self
-            .with_model(model, &session.services.models_manager)
+            .with_model(model.clone(), &session.services.models_manager)
             .await;
-        let mut selected = turn.initial_settings.selected().clone();
-        if let Some(effort) = &routing.compaction_reasoning_effort {
-            selected.collaboration_mode =
-                selected
-                    .collaboration_mode
-                    .with_updates(None, Some(Some(effort.clone())), None);
-        }
+        let model_info = if model == source.model_info.slug {
+            Arc::clone(&source.model_info)
+        } else {
+            Arc::clone(turn.model_info())
+        };
+        let mut selected = source.selected().clone();
+        let requested_effort = routing
+            .compaction_reasoning_effort
+            .clone()
+            .or_else(|| source.reasoning_effort().cloned());
+        let effort = requested_effort
+            .filter(|effort| {
+                model_info
+                    .supported_reasoning_levels
+                    .iter()
+                    .any(|preset| &preset.effort == effort)
+            })
+            .or_else(|| model_info.default_reasoning_level.clone());
+        selected.collaboration_mode =
+            selected
+                .collaboration_mode
+                .with_updates(Some(model.clone()), Some(effort), None);
         if let Some(tier) = &routing.compaction_service_tier {
             selected.service_tier = Some(tier.clone());
         }
         let settings = Arc::new(ResolvedStepSettings::new(
             Arc::new(selected),
-            Arc::clone(turn.model_info()),
+            model_info,
             &turn.config.features,
         ));
         let config = Arc::make_mut(&mut turn.config);
+        config.model = Some(model);
         config.service_tier = settings.service_tier.clone();
         config.model_reasoning_effort = settings.reasoning_effort().cloned();
         turn.session_telemetry = settings.telemetry(&self.session_telemetry);
+        turn.next_step_settings = ArcSwap::from(Arc::clone(&settings));
         turn.initial_settings = settings;
         turn
     }

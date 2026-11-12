@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build the fork with checksum-verified Codex V8 release artifacts."""
+import argparse
 import concurrent.futures
 import hashlib
 import os
@@ -9,6 +10,9 @@ import subprocess
 import tomllib
 import urllib.request
 
+parser = argparse.ArgumentParser()
+parser.add_argument('--test', action='store_true', help='Run routing and compaction regression tests after building')
+args = parser.parse_args()
 root=Path(__file__).resolve().parents[1]
 lock=tomllib.loads((root/'codex-rs/Cargo.lock').read_text())
 version=next(p['version'] for p in lock['package'] if p['name']=='v8')
@@ -28,4 +32,16 @@ env=dict(os.environ,RUSTY_V8_ARCHIVE=archive,RUSTY_V8_SRC_BINDING_PATH=binding)
 env.setdefault('CARGO_BUILD_JOBS','8')
 cargo=Path.home()/'.cargo/bin/cargo'
 if not cargo.exists():cargo=shutil.which('cargo')
-subprocess.run([str(cargo),'build','--profile','dev-small','-p','codex-cli','-p','codex-code-mode-host','-p','codex-exec-server-cli','--bins'],cwd=root/'codex-rs',env=env,check=True)
+subprocess.run([str(cargo),'build','--locked','--profile','dev-small','-p','codex-cli','-p','codex-code-mode-host','-p','codex-exec-server-cli','--bins'],cwd=root/'codex-rs',env=env,check=True)
+
+if args.test:
+    env.setdefault('RUST_MIN_STACK', '33554432')
+    for package, filters in (
+        ('codex-config', ['model_routing']),
+        ('codex-core', ['independent_service_tier', 'agent::role::tests', 'compact::tests', 'compact_remote_v2::', 'compaction_routing']),
+    ):
+        for test_filter in filters:
+            subprocess.run([str(cargo), 'test', '--locked', '--profile', 'dev-small', '-p', package,
+                            '--lib', test_filter], cwd=root/'codex-rs', env=env, check=True)
+    subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', str(root/'scripts'),
+                    '-p', 'test_codex_m_updates.py'], cwd=root, check=True)

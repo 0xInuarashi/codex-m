@@ -636,6 +636,8 @@ pub enum ThreadStoreConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub model_routing: codex_config::config_toml::ModelRoutingToml,
+    /// This agent role's tier; not a default for descendants.
+    pub agent_role_service_tier: Option<String>,
     /// App-server-owned destination policy; other runtimes remain unmanaged.
     pub application_network_policy: codex_http_client::NetworkPolicy,
     /// Auth bootstrap routing installed by the app-server configuration owner.
@@ -4707,7 +4709,8 @@ impl Config {
             tool_output_token_limit: cfg.tool_output_token_limit,
             agents_enabled,
             agent_max_threads,
-            model_routing: cfg.model_routing.clone().unwrap_or_default(),
+            model_routing: cfg.model_routing.clone().unwrap_or_default().normalized(),
+            agent_role_service_tier: None,
             agent_default_subagent_model,
             agent_default_subagent_reasoning_effort,
             agent_max_depth,

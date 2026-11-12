@@ -1,0 +1,89 @@
+name: Sync codex-m with upstream
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codex-m-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == '0xInuarashi/codex-m'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      FORK_BRANCH: codex-m/sol-ultrafast
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUST_MIN_STACK: '33554432'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: codex-m/sol-ultrafast
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Merge upstream without changing the published branch
+        id: merge
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git remote add upstream https://github.com/openai/codex.git
+          git fetch --no-tags upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo 'changed=false' >> "$GITHUB_OUTPUT"
+            echo 'Already contains upstream/main.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! git merge --no-edit upstream/main; then
+            {
+              echo '## Upstream merge needs manual resolution'
+              echo 'The published fork and installed binaries are unchanged.'
+              echo 'Conflicting files:'
+              git diff --name-only --diff-filter=U
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo 'changed=true' >> "$GITHUB_OUTPUT"
+      - name: Prepare Linux build dependencies
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          # Free unused hosted-runner SDKs for this large Rust workspace.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev clang cmake protobuf-compiler
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Build and test the merged fork
+        if: steps.merge.outputs.changed == 'true'
+        run: python3 scripts/build-codex-m.py --test
+      - name: Publish only the tested merge
+        if: steps.merge.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODEX_M_SYNC_SSH_KEY: ${{ secrets.CODEX_M_SYNC_SSH_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code
+          git diff --cached --exit-code
+          # A concurrent human push makes this ordinary push fail; never force it.
+          test -n "$CODEX_M_SYNC_SSH_KEY"
+          key_dir=$(mktemp -d)
+          trap 'rm -rf "$key_dir"' EXIT
+          printf '%s\n' "$CODEX_M_SYNC_SSH_KEY" > "$key_dir/key"
+          chmod 600 "$key_dir/key"
+          # Fetch GitHub's SSH host keys through the authenticated HTTPS API.
+          gh api meta --jq '.ssh_keys[] | "github.com " + .' > "$key_dir/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key_dir/key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$key_dir/known_hosts"
+          git push git@github.com:0xInuarashi/codex-m.git "HEAD:refs/heads/$FORK_BRANCH"
+          echo "Merged and tested upstream at $(git rev-parse HEAD)." >> "$GITHUB_STEP_SUMMARY"
+      - name: Failure summary
+        if: failure()
+        run: echo 'Sync stopped. Inspect this run before resolving conflicts or test failures; no failed merge is published.' >> "$GITHUB_STEP_SUMMARY"

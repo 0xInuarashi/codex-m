@@ -32,8 +32,9 @@ use super::network;
 
 const MAX_VERSION_RESPONSE_BYTES: usize = 1024 * 1024;
 
-const VERSION_FILE_NAME: &str = "version.json";
-const GITHUB_LATEST_RELEASE_URL: &str = "https://api.github.com/repos/openai/codex/releases/latest";
+const VERSION_FILE_NAME: &str = "codex-m-version.json";
+const GITHUB_LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/0xInuarashi/codex-m/releases/latest";
 const HOMEBREW_CASK_API_URL: &str = "https://formulae.brew.sh/api/cask/codex.json";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
 const DESKTOP_UPDATE_URL: &str = "https://persistent.oaistatic.com/codex-app-prod/appcast-x64.xml";
@@ -471,6 +472,19 @@ where
 }
 
 fn is_newer(latest: &str, current: &str) -> Option<bool> {
+    if latest.contains("-codex-m.") && current.contains("-codex-m.") {
+        let (latest_base, latest_revision) = latest.split_once("-codex-m.")?;
+        let (current_base, current_revision) = current.split_once("-codex-m.")?;
+        return Some(
+            (
+                parse_version(latest_base)?,
+                latest_revision.parse::<u64>().ok()?,
+            ) > (
+                parse_version(current_base)?,
+                current_revision.parse::<u64>().ok()?,
+            ),
+        );
+    }
     match (parse_version(latest), parse_version(current)) {
         (Some(latest), Some(current)) => Some(latest > current),
         (Some(_), None) | (None, Some(_)) | (None, None) => None,
@@ -679,6 +693,14 @@ mod tests {
 
     #[test]
     fn is_newer_compares_plain_semver() {
+        assert_eq!(
+            is_newer("0.167.0-codex-m.10", "0.167.0-codex-m.9"),
+            Some(true)
+        );
+        assert_eq!(
+            is_newer("0.167.0-codex-m.9", "0.167.0-codex-m.10"),
+            Some(false)
+        );
         assert_eq!(is_newer("1.2.4", "1.2.3"), Some(true));
         assert_eq!(is_newer("1.2.3", "1.2.4"), Some(false));
         assert_eq!(is_newer("1.2.3-beta.1", "1.2.2"), None);

@@ -39,7 +39,7 @@ if args.test:
     for package, filters in (
         ('codex-config', ['model_routing']),
         ('codex-install-context', ['fork_package_layout']),
-        ('codex-tui', ['update_versions::', 'update_action::', 'updates_cache::']),
+        ('codex-tui', ['update_versions::', 'update_action::', 'updates_cache::', 'update_prompt::']),
         ('codex-core', ['independent_service_tier', 'agent::role::tests', 'compact::tests', 'compact_remote_v2::', 'compaction_routing']),
     ):
         for test_filter in filters:

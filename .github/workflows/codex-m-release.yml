@@ -11,6 +11,7 @@ on:
       - '.github/workflows/codex-m-ci.yml'
       - 'scripts/build-codex-m.py'
       - 'scripts/test_codex_m_*.py'
+      - 'scripts/check-codex-m-packaging.py'
   workflow_dispatch:
 permissions:
   contents: read
@@ -28,6 +29,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     env:
       TARGET: x86_64-unknown-linux-musl
+      CODEX_REPO_ROOT: ${{ github.workspace }}
       CODEX_MUSL_RELEASE_LINK_FLAGS: '1'
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
       CARGO_BUILD_JOBS: '2'
@@ -50,6 +52,8 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler cmake libasound2-dev zstd
+      - name: Check upstream packaging command before compiling
+        run: python3 scripts/check-codex-m-packaging.py
       - name: Read upstream Rust toolchain
         id: rust_toolchain
         run: |

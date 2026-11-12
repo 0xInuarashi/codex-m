@@ -1,0 +1,39 @@
+name: Check codex-m
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+concurrency:
+  group: codex-m-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    if: github.repository == '0xInuarashi/codex-m'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUST_MIN_STACK: '33554432'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - name: Validate installer and installation regressions
+        run: |
+          python3 scripts/generate-codex-m-installer.py --check
+          sh -n install.sh
+          python3 -m unittest discover -s scripts -p 'test_codex_m_*.py'
+      - name: Prepare standard Linux runner
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libcap-dev libasound2-dev bubblewrap clang cmake protobuf-compiler
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          toolchain: '1.95.0'
+      - name: Build CLI and test routing, compaction, installation and updates
+        run: python3 scripts/build-codex-m.py --test

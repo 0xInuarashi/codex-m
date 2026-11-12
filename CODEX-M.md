@@ -119,3 +119,20 @@ the Rust toolchain in `codex-rs/rust-toolchain.toml`, native build dependencies,
 and substantial free disk space. Builds can take several minutes. The automated
 checks cover the fork's changed behavior; they do not establish full upstream
 behavioral compatibility or backend acceptance of every cross-model compaction.
+
+## Native releases and fork CI
+
+The root `install.sh` is generated from upstream's standalone Unix installer by
+`scripts/generate-codex-m-installer.py`. Linux x86_64 releases use upstream's musl,
+OpenSSL, V8 and package-building scripts. The installed CLI loads fork defaults
+natively and uses the upstream update dialog with fork release URLs.
+
+GitHub enables only the `codex-m-ci`, `codex-m-sync` and `codex-m-release` workflows
+for this fork. Inherited upstream workflows are disabled in repository settings;
+their files remain available for upstream merges. Those workflows assume OpenAI's
+runner infrastructure and publishing credentials. Keep them disabled when syncing.
+
+Fork checks run installation, routing, compaction and update regressions on a
+standard Ubuntu runner. Release builds run separately and must pass those checks,
+static binary inspection, and an Alpine smoke test before publication. Failures
+remain visible and prevent publishing; notification preferences are unchanged.

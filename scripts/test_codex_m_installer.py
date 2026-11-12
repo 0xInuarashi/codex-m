@@ -10,11 +10,17 @@ source = source.replace('github.com/openai/codex/', 'github.com/0xInuarashi/code
 source = source.replace('api.github.com/repos/openai/codex/', 'api.github.com/repos/0xInuarashi/codex-m/')
 source = source.replace('INSTALL_SCRIPT = Path(__file__).with_name("install.sh")', f'INSTALL_SCRIPT = Path({str(root / "install.sh")!r})')
 source = source.replace('VERSION = "0.142.5"', 'VERSION = "0.167.0-codex-m.10"')
+source = source.replace('codex-home/packages/standalone', 'codex-home/packages/codex-m')
+# Some runner images use a multicall sleep executable, which needs its original argv[0].
+source = source.replace('subprocess.Popen([str(helper), "300"])', 'subprocess.Popen(["sleep", "300"], executable=str(helper))')
 namespace = {'__name__': 'fork_installer_harness', '__file__': str(root / 'scripts/install/test_install_sh.py')}
 exec(compile(source, str(root / 'scripts/install/test_install_sh.py'), 'exec'), namespace)
 namespace['INSTALL_SCRIPT'] = root / 'install.sh'
 
 class ForkInstallerTest(unittest.TestCase):
+    def test_running_and_previous_packages_survive_updates(self):
+        namespace['InstallShTest']().test_standalone_retains_previous_and_running_releases_across_installs()
+
     def test_native_install_preserves_official_command_and_rejects_corruption(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)

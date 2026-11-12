@@ -48,7 +48,8 @@ if args.test:
     subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', str(root/'scripts'),
                     '-p', 'test_codex_m_updates.py'], cwd=root, check=True)
 
-    subprocess.run([str(cargo), 'test', '--locked', '--profile', 'dev-small', '-p', 'codex-cli',
-                    '--bin', 'codex', 'codex_m::'], cwd=root/'codex-rs', env=env, check=True)
+    for test_filter in ('codex_m::', 'doctor::updates::'):
+        subprocess.run([str(cargo), 'test', '--locked', '--profile', 'dev-small', '-p', 'codex-cli',
+                        '--bin', 'codex', test_filter], cwd=root/'codex-rs', env=env, check=True)
     subprocess.run(['python3', '-m', 'unittest', 'discover', '-s', str(root/'scripts'),
                     '-p', 'test_codex_m_installer.py'], cwd=root, check=True)

@@ -30,6 +30,7 @@ def fetch(name):
 with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:archive,binding=list(pool.map(fetch,names))
 env=dict(os.environ,RUSTY_V8_ARCHIVE=archive,RUSTY_V8_SRC_BINDING_PATH=binding)
 env.setdefault('CARGO_BUILD_JOBS','8')
+env.setdefault('CARGO_NET_GIT_FETCH_WITH_CLI', 'true')
 cargo=Path.home()/'.cargo/bin/cargo'
 if not cargo.exists():cargo=shutil.which('cargo')
 subprocess.run([str(cargo),'build','--locked','--profile','dev-small','-p','codex-cli','-p','codex-code-mode-host','-p','codex-exec-server-cli','--bins'],cwd=root/'codex-rs',env=env,check=True)

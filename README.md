@@ -27,7 +27,7 @@ curl -fsSL https://raw.githubusercontent.com/0xInuarashi/codex-m/main/install.sh
 
 The installer verifies release checksums, installs `~/.local/bin/codex-m`, and stores packages under `${CODEX_HOME:-~/.codex}/packages/codex-m`. Existing Codex authentication and fork settings are preserved. Once installed, run `codex-m login` if needed, then `codex-m`.
 
-The command requires a published [release](https://github.com/0xInuarashi/codex-m/releases); the first musl release is being prepared. Build progress is available in [Actions](https://github.com/0xInuarashi/codex-m/actions/workflows/codex-m-release.yml).
+Published binaries are listed in [Releases](https://github.com/0xInuarashi/codex-m/releases). Build and verification status is available in [Actions](https://github.com/0xInuarashi/codex-m/actions/workflows/codex-m-release.yml).
 
 ### Optional: build from source
 

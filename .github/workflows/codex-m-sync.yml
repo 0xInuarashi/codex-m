@@ -19,6 +19,7 @@ jobs:
     timeout-minutes: 120
     env:
       FORK_BRANCH: main
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       RUST_MIN_STACK: '33554432'

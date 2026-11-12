@@ -1,0 +1,98 @@
+name: Build codex-m release
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'codex-rs/**'
+      - 'scripts/codex-m.defaults.toml'
+      - 'scripts/generate-codex-m-installer.py'
+      - 'install.sh'
+      - '.github/workflows/codex-m-release.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: codex-m-release
+  cancel-in-progress: false
+jobs:
+  linux:
+    if: github.repository == '0xInuarashi/codex-m'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    env:
+      TARGET: x86_64-unknown-linux-musl
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_RELEASE_LTO: 'off'
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+      CARGO_PROFILE_RELEASE_DEBUG: '0'
+      AWS_LC_SYS_NO_JITTER_ENTROPY: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+      - name: Check installer
+        run: |
+          python3 scripts/generate-codex-m-installer.py --check
+          sh -n install.sh
+          python3 -m unittest discover -s scripts -p test_codex_m_installer.py
+      - name: Prepare runner
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake libasound2-dev zstd
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
+        with:
+          toolchain: '1.95.0'
+          targets: x86_64-unknown-linux-musl
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: '0.14.0'
+      - name: Configure upstream musl toolchain
+        run: bash .github/scripts/install-musl-build-tools.sh
+      - uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: x86_64-unknown-linux-musl
+      - name: Stamp release version
+        run: |
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+          path = pathlib.Path('codex-rs/Cargo.toml')
+          source = path.read_text()
+          old = tomllib.loads(source)['workspace']['package']['version']
+          version = old.split('-')[0] + '-codex-m.' + os.environ['GITHUB_RUN_ID']
+          path.write_text(source.replace(f'version = "{old}"', f'version = "{version}"', 1))
+          with open(os.environ['GITHUB_ENV'], 'a') as env:
+              env.write(f'RELEASE_VERSION={version}\n')
+              env.write(f'STABLE_GIT_COMMIT={os.environ["GITHUB_SHA"]}\n')
+          PY
+          cd codex-rs
+          cargo update --workspace
+      - name: Build sandbox resource
+        working-directory: codex-rs
+        run: |
+          cargo build --locked --release --target "$TARGET" --bin bwrap
+          strip --strip-debug --strip-unneeded "target/$TARGET/release/bwrap"
+          echo "CODEX_BWRAP_SHA256=$(sha256sum "target/$TARGET/release/bwrap" | cut -d ' ' -f 1)" >> "$GITHUB_ENV"
+      - name: Build native CLI and helpers
+        working-directory: codex-rs
+        run: |
+          cargo build --locked --release --target "$TARGET" --bin codex --bin codex-code-mode-host --bin codex-exec-server
+          for binary in codex codex-code-mode-host codex-exec-server; do
+            strip --strip-debug --strip-unneeded "target/$TARGET/release/$binary"
+            if readelf -l "target/$TARGET/release/$binary" | grep -q INTERP; then
+              echo "Unexpected dynamic runtime requirement in $binary" >&2
+              exit 1
+            fi
+          done
+          "target/$TARGET/release/codex" --version
+      - name: Package using upstream layout
+        run: |
+          bash .github/scripts/build-codex-package-archive.sh --target "$TARGET" --bundle primary --entrypoint-dir "codex-rs/target/$TARGET/release" --archive-dir dist
+          cd dist
+          sha256sum codex-package-*.tar.gz > codex-package_SHA256SUMS
+      - name: Publish verified package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "rust-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "codex-m $RELEASE_VERSION" --notes "Linux x86_64 native musl build. Install with the install.sh script on main. Source: $GITHUB_SHA" dist/codex-package-*.tar.gz dist/codex-package_SHA256SUMS

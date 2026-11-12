@@ -15,11 +15,23 @@ The fork installs a separate `codex-m` command and shares your existing Codex au
 - **Sub-agent routing:** configure a default model and reasoning effort, plus a service tier that can differ from the main agent's. Role-specific settings remain supported; upstream model/effort inheritance rules still apply to full-history forks.
 - **Compaction routing:** choose the model, reasoning effort, and service tier used to summarize context without changing the main conversation's model.
 - **Upstream sync:** a scheduled workflow merges `openai/codex/main` into the fork and publishes the merge only after the build and regression checks pass.
-- **Local updates:** the launcher checks for newer fork revisions and can build, test, and install them with `codex-m update`.
+- **Binary updates:** the native update prompt installs published fork releases without compiling locally.
 
 ## Install codex-m
 
-The installation scripts currently support **Linux x86-64 with glibc**. Installation is from source; this repository does not currently provide a packaged codex-m installer for macOS, Windows, or ARM Linux.
+Prebuilt releases target **Linux x86-64**, using upstream's **musl** toolchain and standalone package layout. They do not require Python, Rust, Git, a recent glibc, or a system OpenSSL installation. Other platforms are not yet published by this fork.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/0xInuarashi/codex-m/main/install.sh | sh
+```
+
+The installer verifies release checksums, installs `~/.local/bin/codex-m`, and stores packages under `${CODEX_HOME:-~/.codex}/packages/codex-m`. Existing Codex authentication and fork settings are preserved. Once installed, run `codex-m login` if needed, then `codex-m`.
+
+The command requires a published [release](https://github.com/0xInuarashi/codex-m/releases); the first musl release is being prepared. Build progress is available in [Actions](https://github.com/0xInuarashi/codex-m/actions/workflows/codex-m-release.yml).
+
+### Optional: build from source
+
+The following developer installation uses the older Python source-build updater. Python and Rust are build requirements for this route, not requirements of the prebuilt installer.
 
 ### 1. Install prerequisites
 
@@ -122,21 +134,11 @@ The installer preserves an existing codex-m configuration. Remove optional routi
 
 ## Update codex-m
 
-There are two steps to an update:
+The [sync workflow](https://github.com/0xInuarashi/codex-m/actions/workflows/codex-m-sync.yml) merges upstream every six hours and publishes only after its build and regression checks pass. Conflicts or failing checks stop integration.
 
-1. **GitHub integrates upstream.** Every six hours, the [sync workflow](https://github.com/0xInuarashi/codex-m/actions/workflows/codex-m-sync.yml) checks upstream `main`, attempts a merge, refreshes the fork's workspace lockfile, and builds and tests the result. Conflicts or failing checks stop publication. The workflow can also be started manually from GitHub Actions.
-2. **Your machine installs the updated fork.** When a newer fork revision is published, the launcher offers `Update now? [y/N]` on a subsequent interactive launch. Type `y` to build and install it; Enter continues with your current version.
+Changes on `main` trigger the [release workflow](https://github.com/0xInuarashi/codex-m/actions/workflows/codex-m-release.yml). Once a binary release is published, the native Codex update dialog offers it on startup. Update discovery is cached, so a new release may not appear immediately. An upstream commit alone is not an installable update.
 
-You can check and update explicitly:
-
-```bash
-codex-m update --check
-codex-m update
-```
-
-Automatic discovery runs in the background and caches results for up to six hours. `--check` refreshes the result immediately. The message **"OpenAI Codex has new changes awaiting integration into codex-m"** means upstream has advanced but a corresponding fork update has not been published yet; inspect the workflow's status before expecting an update prompt.
-
-Local updates require a clean source checkout whose commits are included in the published fork. Commit and push your local changes, or reconcile divergent work, before updating. The updater builds in a separate worktree, runs tests, and switches the active installation only after staging all binaries and checking that the CLI starts. Settings and previous binaries are retained; running sessions keep their existing executables.
+To install the latest binary release immediately, rerun the curl installer above. Existing source installations can migrate with the same command. The older Python launcher still supports `codex-m update` for source builds; the native binary uses the startup dialog and installer instead.
 
 To disable automatic checks, add this **top-level** setting before any table headers in `~/.config/codex-m/config.toml`:
 

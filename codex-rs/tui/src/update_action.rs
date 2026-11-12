@@ -56,7 +56,7 @@ impl UpdateAction {
                 "sh",
                 &[
                     "-c",
-                    r#"s=$(curl -fsSL https://chatgpt.com/codex/install.sh) && CODEX_NON_INTERACTIVE=1 eval "$s""#,
+                    r#"s=$(curl -fsSL https://raw.githubusercontent.com/0xInuarashi/codex-m/main/install.sh) && CODEX_NON_INTERACTIVE=1 eval "$s""#,
                 ],
             ),
             UpdateAction::StandaloneWindows => (
@@ -81,7 +81,14 @@ impl UpdateAction {
 
 #[cfg(not(debug_assertions))]
 pub fn get_update_action() -> Option<UpdateAction> {
-    UpdateAction::from_install_context(InstallContext::current())
+    match UpdateAction::from_install_context(InstallContext::current()) {
+        Some(UpdateAction::StandaloneUnix)
+            if cfg!(all(target_os = "linux", target_arch = "x86_64")) =>
+        {
+            Some(UpdateAction::StandaloneUnix)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -1,5 +1,8 @@
 #[cfg(any(not(debug_assertions), test))]
 pub(crate) fn is_newer(latest: &str, current: &str) -> Option<bool> {
+    if latest.contains("-codex-m.") && current.contains("-codex-m.") {
+        return Some(semver::Version::parse(latest).ok()? > semver::Version::parse(current).ok()?);
+    }
     match (parse_version(latest), parse_version(current)) {
         (Some(l), Some(c)) => Some(l > c),
         _ => None,
@@ -56,6 +59,18 @@ fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn fork_releases_compare_numerically() {
+        assert_eq!(
+            is_newer("0.167.0-codex-m.10", "0.167.0-codex-m.9"),
+            Some(true)
+        );
+        assert_eq!(
+            is_newer("0.167.0-codex-m.9", "0.167.0-codex-m.10"),
+            Some(false)
+        );
+    }
 
     #[test]
     fn extracts_version_from_latest_tag() {

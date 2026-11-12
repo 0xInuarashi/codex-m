@@ -53,6 +53,7 @@ static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod app_cmd;
+mod codex_m;
 mod config_override_args;
 mod daemon_install;
 mod daemon_telemetry;
@@ -1065,6 +1066,7 @@ async fn dispatch_cli(
         subcommand,
     } = config_override_args::try_parse_from(std::env::args_os())
         .unwrap_or_else(|error| error.exit());
+    codex_m::prepend_defaults(&mut root_config_overrides.raw_overrides)?;
     // Retain the launch target through TUI exit, even if a launcher changes selection.
     let daemon_cli_executable = arg0_paths
         .codex_self_exe

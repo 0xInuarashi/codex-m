@@ -321,7 +321,10 @@ fn standalone_install_method(
         .join("packages")
         .join(STANDALONE_PACKAGES_DIRNAME)
         .join(RELEASES_DIRNAME);
-    if !release_dir.starts_with(releases_root.as_path()) {
+    let fork_releases_root = canonical_codex_home.join("packages/codex-m/releases");
+    if !release_dir.starts_with(releases_root.as_path())
+        && !release_dir.starts_with(fork_releases_root.as_path())
+    {
         return None;
     }
 

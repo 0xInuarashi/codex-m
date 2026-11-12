@@ -23,10 +23,12 @@
 pub(crate) use chat_composer::CommandPopupPlacement;
 pub(crate) use chat_composer::ComposerRenderOptions;
 pub(crate) use chat_composer::TranscriptFooter;
+pub(crate) use chat_composer::composer_layout::FooterLayout;
 pub(crate) use composer_gap::ComposerGap;
 pub(crate) use footer::footer_hint_items_line;
 pub(crate) use footer::inset_footer_hint_area;
-pub(crate) use footer::render_unfocused_status;
+pub(crate) use status_line::StatusLine;
+pub(crate) use status_line::StatusLineFocus;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
@@ -93,6 +95,7 @@ pub(crate) use multi_select_picker::MultiSelectPicker;
 mod question_tests;
 mod questions;
 mod request_user_input;
+mod status_line;
 mod status_line_setup;
 mod status_line_style;
 mod status_surface_preview;
@@ -119,7 +122,6 @@ pub(crate) use approval_overlay::format_requested_permissions_rule;
 pub(crate) use async_questions::AsyncQuestions;
 pub(crate) use async_questions::QuestionState;
 pub(crate) use async_questions::QuestionSubmission;
-pub(crate) use footer::footer_content;
 pub(crate) use mcp_server_elicitation::McpServerElicitationFormRequest;
 pub(crate) use mcp_server_elicitation::McpServerElicitationOverlay;
 pub(crate) use request_user_input::RequestUserInputOverlay;
@@ -1396,7 +1398,7 @@ impl BottomPane {
         self.status_widget().is_some()
     }
 
-    pub(crate) fn status_line_content(&self) -> Option<&footer_content::FooterContent> {
+    pub(crate) fn status_line_content(&self) -> Option<&StatusLine> {
         self.composer.status_line_content()
     }
 
@@ -2445,9 +2447,10 @@ impl BottomPane {
 
     pub(crate) fn backdrop_with_options<'a>(
         &'a self,
-        options: ComposerRenderOptions<'a>,
+        mut options: ComposerRenderOptions<'a>,
     ) -> RenderableItem<'a> {
         let views = if self.centered_dialog().is_some() {
+            options.is_dialog_backdrop = true;
             &self.view_stack[..self.view_stack.len() - 1]
         } else {
             &self.view_stack
@@ -2598,6 +2601,7 @@ impl BottomPane {
                 && options.warning_count == 0
                 && options.footer.is_none()
                 && !options.separate_status_line
+                && !options.is_dialog_backdrop
                 && options.command_popup_placement == CommandPopupPlacement::AboveComposer
             {
                 RenderableItem::Borrowed(&self.composer)
@@ -2622,7 +2626,7 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    pub(crate) fn set_status_line(&mut self, status_line: Option<footer_content::FooterContent>) {
+    pub(crate) fn set_status_line(&mut self, status_line: Option<StatusLine>) {
         if self.composer.set_status_line(status_line) {
             self.request_redraw();
         }

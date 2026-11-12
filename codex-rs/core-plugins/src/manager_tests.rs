@@ -10,7 +10,6 @@ use crate::loader::load_plugin_skill_inventory;
 use crate::loader::load_plugins_from_layer_stack;
 use crate::loader::plugin_capability_summary_from_root;
 use crate::loader::refresh_non_curated_plugin_cache;
-use crate::loader::refresh_non_curated_plugin_cache_force_reinstall;
 use crate::marketplace::MarketplacePluginInstallPolicy;
 use crate::remote::REMOTE_GLOBAL_MARKETPLACE_NAME;
 use crate::remote::REMOTE_WORKSPACE_MARKETPLACE_NAME;
@@ -6151,7 +6150,9 @@ plugins = true
         .mount(&server)
         .await;
 
-    let mut config = load_config(tmp.path(), tmp.path()).await;
+    let mut config = load_config(tmp.path(), tmp.path())
+        .await
+        .with_plugin_recommendations_enabled(/*enabled*/ true);
     config.chatgpt_base_url = server.uri();
     let manager = std::sync::Arc::new(test_plugins_manager(tmp.path().to_path_buf()));
     let auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
@@ -6880,10 +6881,13 @@ enabled = true
             .write()
             .expect("refresh state lock");
         assert!(matches!(
-            state.requested.as_ref().map(|request| request.git_mode),
+            state
+                .pending_configured_plugins_refresh
+                .as_ref()
+                .map(|request| request.git_mode),
             Some(PluginGitMode::Manual)
         ));
-        state.last_refreshed = state.requested.take();
+        state.last_refreshed = state.pending_configured_plugins_refresh.take();
         state.in_flight = false;
     }
 
@@ -6895,8 +6899,8 @@ enabled = true
             .write()
             .expect("refresh state lock");
         assert!(!state.in_flight);
-        assert!(state.requested.is_none());
-        state.requested = state.last_refreshed.clone();
+        assert!(state.pending_configured_plugins_refresh.is_none());
+        state.pending_configured_plugins_refresh = state.last_refreshed.clone();
         state.in_flight = true;
     }
 
@@ -6916,7 +6920,10 @@ enabled = true
         .non_curated_cache_refresh_state
         .read()
         .expect("refresh state lock");
-    let request = state.requested.as_ref().expect("pending refresh");
+    let request = state
+        .pending_configured_plugins_refresh
+        .as_ref()
+        .expect("pending refresh");
     assert!(matches!(request.git_mode, PluginGitMode::Automatic));
     assert_eq!(
         request.configured_plugin_sources[0]
@@ -7127,12 +7134,15 @@ enabled = true
     );
 
     assert!(
-        refresh_non_curated_plugin_cache_force_reinstall(
+        refresh_non_curated_plugin_cache_with_mode(
             tmp.path(),
             &[AbsolutePathBuf::try_from(repo_root).unwrap()],
-            &["sample-plugin@debug".to_string()],
+            ["sample-plugin@debug"],
+            NonCuratedCacheRefreshMode::ForceReinstall,
+            PluginGitMode::Automatic,
         )
         .expect("cache refresh should reinstall unchanged local version")
+        .cache_refreshed
     );
 
     assert_eq!(

@@ -275,7 +275,7 @@ impl CodexThread {
             .await
     }
 
-    /// Reads this thread's configured clock, including an external or simulated clock.
+    /// Reads this thread's configured clock.
     pub async fn current_time(&self) -> CodexResult<DateTime<Utc>> {
         self.session
             .services
@@ -433,12 +433,15 @@ impl CodexThread {
         if contributors.is_empty() {
             return;
         }
-        let config = self.config().await;
+        let (config, history_initialization, history_mode) =
+            self.session.thread_ready_config().await;
         for contributor in contributors {
             contributor
                 .on_thread_ready(codex_extension_api::ThreadReadyInput {
                     config: config.as_ref(),
                     session_source: &self.session_source,
+                    history_initialization,
+                    history_mode,
                     session_store: &self.session.services.session_extension_data,
                     thread_store: &self.session.services.thread_extension_data,
                 })
@@ -584,7 +587,9 @@ impl CodexThread {
 
     /// Starts a new internal continuation turn when idle, including in Plan mode.
     /// Rejects if a newer task has started, even if it has already finished.
-    /// The input must be a response item; it is never treated as user authorization.
+    /// Supply an internal response item, or empty input to wake on a result already
+    /// saved in history. An empty wake inherits the preceding turn's attribution
+    /// and adds no message or user authorization.
     pub async fn continue_turn_if_idle(
         &self,
         request: impl Into<WithTurnExtensionData<TurnInputRequest>>,
@@ -796,6 +801,11 @@ impl CodexThread {
         self.session.interrupted_turn().await
     }
 
+    /// Returns whether core owns a turn slot, including before `TurnStarted` is published.
+    pub async fn has_active_turn(&self) -> bool {
+        self.session.active_turn.lock().await.is_some()
+    }
+
     /// Returns the trusted root when the expected turn is currently active.
     pub async fn active_turn_root(&self, expected_turn_id: &str) -> Option<String> {
         let active = self.session.active_turn.lock().await;
@@ -826,7 +836,9 @@ impl CodexThread {
     }
 
     /// Queues settings for future turns and waits for Core to accept or reject them.
-    /// Rejections are returned to the caller instead of emitted as thread errors.
+    /// Rejections are returned to the caller instead of emitted as thread errors. A host-root
+    /// service-tier update also waits for local host acceptance outside Core's submission loop.
+    /// A handoff error leaves the settings committed locally. Callers can retry the same tier.
     pub async fn update_thread_settings(
         &self,
         thread_settings: impl Into<WithTurnExtensionData<ThreadSettingsOverrides>>,
@@ -857,7 +869,11 @@ impl CodexThread {
         settings: CodexThreadSettingsOverrides,
     ) -> ConstraintResult<()> {
         let updates = self.thread_settings_update(settings);
-        self.session.update_settings(updates).await.map(|_| ())
+        let commit = self.session.update_settings(updates).await?;
+        if let Some(accepted) = commit.host_acceptance {
+            let _ = accepted.await;
+        }
+        Ok(())
     }
 
     /// Replaces tools for subsequent model steps and future turns, preserving in-flight calls.
@@ -1019,6 +1035,19 @@ impl CodexThread {
         self.inject_response_items_for_turn(items).await?;
         self.checkpoint_preparation().await?;
         Ok(())
+    }
+
+    /// Returns the first prompt for an approved plan, recording untrusted context if needed.
+    pub async fn prepare_approved_plan(
+        &self,
+        path: Option<&PathUri>,
+        markdown: &str,
+    ) -> CodexResult<String> {
+        let (prompt, items) = self.session.prepare_approved_plan(path, markdown).await?;
+        if !items.is_empty() {
+            self.inject_response_items(items).await?;
+        }
+        Ok(prompt)
     }
 
     /// Record raw Responses API items immediately before admitting a user turn.
@@ -1277,17 +1306,13 @@ impl CodexThread {
             .authorization_version(history.as_ref())
     }
 
-    /// Returns bounded root conversation evidence and its authorization version atomically.
+    /// Captures root originals and authorization before request-size preparation.
     pub async fn guardian_root_snapshot(&self) -> Option<GuardianRootSnapshot> {
-        let mut snapshot = self
-            .session
+        self.session
             .services
             .agent_control
             .get_guardian_package(self.session.thread_id)
-            .await?;
-        // Async consumers need only the bounded projection, not the sync source snapshot.
-        snapshot.request_candidates = None;
-        Some(snapshot)
+            .await
     }
 
     /// Refresh the thread's layer-backed user config state from a caller-supplied
@@ -1310,9 +1335,8 @@ impl CodexThread {
         self.session.disable_mcp_enterprise_auth().await;
     }
 
-    /// Refresh MCP configuration, managed requirements, and explicit session plugin overrides.
-    /// Omitted session plugins preserve current overrides; an empty map restores inheritance.
-    /// Other session overrides and user settings remain unchanged.
+    /// Refresh MCP configuration, managed requirements, and session plugin and app overrides.
+    /// An omitted section preserves its current overrides. An empty map restores inheritance.
     /// A stale owner requires reloading from the current config before retrying.
     pub async fn refresh_mcp_config(
         &self,

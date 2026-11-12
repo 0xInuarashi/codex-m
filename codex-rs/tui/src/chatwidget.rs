@@ -376,6 +376,8 @@ pub(crate) use realtime::realtime_delegation_input;
 pub(crate) use realtime::tests::activate_voice_for_thread;
 #[cfg(test)]
 pub(crate) use realtime::tests::commit_realtime_history_events;
+#[cfg(test)]
+pub(crate) use realtime::tests::start_voice_attempt_for_test;
 mod reasoning_shortcuts;
 use self::realtime::RealtimeConversationUiState;
 mod rendering;
@@ -550,6 +552,10 @@ pub(crate) struct ChatWidget {
     has_codex_backend_auth: bool,
     model_catalog: Arc<ModelCatalog>,
     model_popup_request_id: Option<uuid::Uuid>,
+    pub(crate) cloud_picker_selection:
+        Option<crate::app_server_session::user_message_submission::CloudModelSelection>,
+    pub(crate) pending_cloud_turn_settings:
+        Option<crate::app_server_session::user_message_submission::PendingCloudTurnSettings>,
     /// An app event has been queued to open the permissions picker, but no view exists yet.
     pub(crate) permission_popup_pending: bool,
     permission_popup_request_id: Option<uuid::Uuid>,
@@ -566,6 +572,7 @@ pub(crate) struct ChatWidget {
     pub(crate) remote_connection: Option<RemoteConnectionStatus>,
     /// Remote app servers cannot read image paths on the TUI host.
     pub(crate) snapshot_local_images: bool,
+    pub(crate) thread_settings_owner: crate::app_server_session::ThreadSettingsOwner,
     pending_image_submission: Option<image_submission::PendingImageSubmission>,
     pub(crate) local_worktree_operations: bool,
     pub(crate) windows_sandbox_local_server: bool,
@@ -702,6 +709,8 @@ pub(crate) struct ChatWidget {
     // order.
     suppress_initial_user_message_submit: bool,
     input_queue: InputQueueState,
+    /// Hold this conversation's queued input until its reply stream is usable.
+    pub(crate) thread_stream_disconnected: bool,
     safety_buffering_prompt: Option<UserMessage>,
     safety_buffering_source: UserMessageSource,
     /// Main chat-surface bindings resolved from `tui.keymap.chat`.
@@ -2111,15 +2120,18 @@ impl ChatWidget {
         self.bottom_pane.new_status_indicator()
     }
 
+    #[cfg(test)]
     pub(crate) fn status_line_text(&self) -> Option<String> {
-        self.status_line_content()
-            .cloned()
-            .map(|content| content.into_hyperlink_line().line.to_string())
+        self.status_line_content().map(|status| {
+            status
+                .as_native()
+                .expect("native status line")
+                .line
+                .to_string()
+        })
     }
 
-    pub(crate) fn status_line_content(
-        &self,
-    ) -> Option<&crate::bottom_pane::footer_content::FooterContent> {
+    pub(crate) fn status_line_content(&self) -> Option<&crate::bottom_pane::StatusLine> {
         self.bottom_pane.status_line_content()
     }
 
@@ -2139,13 +2151,13 @@ fn has_websocket_timing_metrics(summary: RuntimeMetricsSummary) -> bool {
 
 impl Drop for ChatWidget {
     fn drop(&mut self) {
-        if self.realtime_conversation.handle.is_some()
-            && let Some(thread_id) = self.thread_id
+        let had_live_peer = self.realtime_conversation.handle.is_some();
+        if let Some(thread_id) = self.reset_realtime_conversation()
+            && had_live_peer
         {
             self.app_event_tx
                 .send(AppEvent::StopRealtimeConversation { thread_id });
         }
-        self.reset_realtime_conversation();
         self.stop_rate_limit_poller();
     }
 }

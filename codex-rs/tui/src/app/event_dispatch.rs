@@ -103,6 +103,7 @@ impl App {
                     | AppEvent::ManagedWorktreeCreated(_)
                     | AppEvent::AgentsOverviewWorktreeCreated(_)
                     | AppEvent::AgentsOverviewPinToggled { .. }
+                    | AppEvent::AgentsOverviewUsageLoaded { .. }
                     | AppEvent::AppendMessageHistoryEntry { .. }
                     | AppEvent::BeginInitialHistoryReplayBuffer
                     | AppEvent::BeginThreadSwitchHistoryReplayBuffer
@@ -110,6 +111,26 @@ impl App {
                     | AppEvent::FatalExitRequest(_)
             )
         {
+            return Ok(AppRunControl::Continue);
+        }
+        let overview_action_thread = match &event {
+            AppEvent::ForkAgentsOverviewThread { thread_id }
+            | AppEvent::RenameAgentsOverviewThread { thread_id, .. }
+            | AppEvent::ToggleAgentsOverviewPin { thread_id, .. }
+            | AppEvent::RunAgentsOverviewAction { thread_id, .. }
+            | AppEvent::StopAgentsOverviewThread { thread_id } => Some(*thread_id),
+            _ => None,
+        };
+        let overview_action_owner = match &event {
+            AppEvent::NewAgentsOverviewSession { backend_id, .. }
+            | AppEvent::NewAgentsOverviewWorktree { backend_id, .. } => *backend_id,
+            _ => overview_action_thread.and_then(|id| self.backend_registry.owner(id)),
+        };
+        if overview_action_owner.is_some_and(|owner| owner != app_server.backend_id()) {
+            if matches!(&event, AppEvent::ToggleAgentsOverviewPin { .. }) {
+                self.repaint_agents_overview();
+            }
+            self.add_agents_overview_error("Open this task before using that action.".into());
             return Ok(AppRunControl::Continue);
         }
         if matches!(
@@ -545,26 +566,8 @@ impl App {
             AppEvent::RawOutputModeChanged { enabled } => {
                 self.apply_raw_output_mode(tui, enabled, /*notify*/ false);
             }
-            AppEvent::ClearUiAndSubmitUserMessage { text } => {
-                if self.reject_pending_permission_root_switch() {
-                    self.chat_widget.restore_user_message_to_composer(text.into());
-                    return Ok(AppRunControl::Continue);
-                }
-                self.clear_terminal_ui(tui, /*redraw_header*/ false)?;
-                self.reset_app_ui_state_after_clear();
-
-                self.start_fresh_session(
-                    tui,
-                    app_server,
-                    Some(ThreadStartSource::Clear),
-                    crate::chatwidget::create_initial_user_message(
-                        Some(text),
-                        Vec::new(),
-                        Vec::new(),
-                    ),
-                    /*new_thread_name*/ None,
-                )
-                .await;
+            AppEvent::ImplementPlanInFreshSession { plan } => {
+                crate::boxed_future!(self.implement_plan_in_fresh_session(tui, app_server, plan)).await?;
             }
             AppEvent::OpenResumePicker => {
                 self.pending_open_resume_picker = true;
@@ -1059,17 +1062,6 @@ impl App {
             AppEvent::ResetTranscriptForThreadSwitchPreservingScreen => {
                 self.reset_transcript_state_after_clear();
                 tui.clear_pending_history_lines();
-                let switched_tab = self.conversation_frame.chat_strip.is_some()
-                    && self.active_side_parent_thread_id().is_some()
-                    && self.conversation_frame.sidebar_input.is_some_and(|painted| {
-                        painted.selected_chat != self.current_displayed_thread_id()
-                    });
-                if self.conversation_frame.chooser_area().is_none()
-                    && self.chooser_focus().is_none()
-                    && !switched_tab
-                {
-                    tui.defer_thread_switch_clear();
-                }
                 self.pending_thread_switch_resets -= 1;
             }
             AppEvent::CommitRealtimeTranscriptHistory => {
@@ -2474,6 +2466,28 @@ impl App {
                     offer.handle.close();
                 }
             }
+            AppEvent::RealtimeCallCreated { thread_id, attempt_id, result } => {
+                if let Some(owner) = self.voice_widget_for_thread(thread_id)
+                    && owner.is_starting_realtime_attempt(thread_id, attempt_id)
+                {
+                    let result = match result {
+                        Ok(call) => {
+                            owner.accept_realtime_call(call.answer_sdp);
+                            app_server.thread_realtime_start(thread_id, call.call_id).await
+                        }
+                        Err(error) => Err(error),
+                    };
+                    if let Err(error) = result
+                        && !self.recover_transport_error(&error)
+                        && let Some(owner) = self.voice_widget_for_thread(thread_id)
+                    {
+                        owner.on_realtime_error(
+                            format!("Voice conversation failed: {error:#}"),
+                            crate::chatwidget::RealtimeFailureCause::AppServerRequest,
+                        );
+                    }
+                }
+            }
             AppEvent::RealtimeWebrtcConnected {
                 thread_id,
                 attempt_id,
@@ -2604,6 +2618,12 @@ impl App {
             }
             AppEvent::ModelsLoaded { request_id, result }
             | AppEvent::ApiKeyCompatModelsLoaded { request_id, result } => {
+                let result = match app_server.request_handle() {
+                    AppServerRequestHandle::Cloud(handle) if !handle.model_catalog_is_current() => {
+                        Err("Cloud model catalog account changed.".into())
+                    }
+                    _ => result,
+                };
                 self.chat_widget.on_models_loaded(request_id, result);
                 let catalog = self.chat_widget.model_catalog();
                 if !Arc::ptr_eq(&self.model_catalog, &catalog) {
@@ -2687,8 +2707,13 @@ impl App {
                 }
             }
             AppEvent::OpenPlanReasoningScopePrompt { model, effort } => {
-                self.chat_widget
-                    .open_plan_reasoning_scope_prompt(model, effort);
+                if app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud {
+                    self.select_session_model(app_server, model, effort, /*service_tier*/ None)
+                        .await;
+                } else {
+                    self.chat_widget
+                        .open_plan_reasoning_scope_prompt(model, effort);
+                }
             }
             AppEvent::OpenAllModelsPopup => {
                 self.chat_widget.open_all_models_popup();
@@ -2991,6 +3016,39 @@ impl App {
             AppEvent::PersistRealtimeVoiceSelection { voice } => {
                 self.persist_realtime_voice(app_server, voice).await;
             }
+            AppEvent::ToggleCloudServiceTier { thread_id, tier } => {
+                if self.active_thread_id == Some(thread_id)
+                    && self.chat_widget.thread_id() == Some(thread_id)
+                    && app_server.thread_params_mode() == crate::ThreadParamsMode::Cloud
+                {
+                    if !self.chat_widget.current_model_service_tier_commands().iter()
+                        .any(|command| command.id == tier)
+                    {
+                        self.chat_widget.add_error_message(
+                            "The selected Cloud model does not support that speed.".into(),
+                        );
+                        return Ok(AppRunControl::Continue);
+                    }
+                    let current = self.chat_widget.config_ref().service_tier.as_deref();
+                    match app_server.toggle_cloud_service_tier(thread_id, current, tier) {
+                        Some(tier) => {
+                            let label = match tier.as_str() {
+                                codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE => "standard",
+                                "priority" => "fast",
+                                tier => tier,
+                            };
+                            self.chat_widget.add_info_message(
+                                format!("Selected {label} speed for the next new turn in this conversation"),
+                                /*hint*/ None,
+                            );
+                        }
+                        None => self.chat_widget.add_error_message(
+                            "The Cloud account changed. Reopen the conversation before choosing a speed."
+                                .into(),
+                        ),
+                    }
+                }
+            }
             AppEvent::PersistServiceTierSelection { service_tier } => {
                 self.refresh_status_line();
                 self.config.service_tier = service_tier.clone();
@@ -3227,7 +3285,7 @@ impl App {
                     self.refresh_changed_agents_overview_threads(app_server);
                 }
             }
-            AppEvent::NewAgentsOverviewSession { cwd } => {
+            AppEvent::NewAgentsOverviewSession { cwd, .. } => {
                 return Box::pin(self.new_agents_overview_session(tui, app_server, cwd)).await;
             }
             AppEvent::AgentsOverviewThreadsLoaded { request_id, result } => {
@@ -3275,7 +3333,7 @@ impl App {
                 return control;
             }
             AppEvent::ForkAgentsOverviewThreadReady { .. } => unreachable!("normalized above"),
-            AppEvent::NewAgentsOverviewWorktree { cwd } => {
+            AppEvent::NewAgentsOverviewWorktree { cwd, .. } => {
                 Box::pin(self.new_agents_overview_worktree(tui, app_server, cwd)).await;
             }
             AppEvent::AgentsOverviewWorktreeCreated(result) => {
@@ -3296,7 +3354,7 @@ impl App {
             AppEvent::RenameAgentsOverviewThread { thread_id, name } => {
                 match app_server.thread_set_name(thread_id, name.clone()).await {
                     Ok(()) => {
-                        self.chat_widget.expect_manual_thread_name(thread_id, name);
+                        self.chat_widget.display_thread_name(thread_id, name);
                         self.cancel_thread_title_generation(thread_id);
                     }
                     Err(error) => {
@@ -3334,6 +3392,7 @@ impl App {
                 thread_id,
                 destination,
                 prompt,
+                fallback_title,
                 effort,
                 result,
             } => {
@@ -3342,6 +3401,7 @@ impl App {
                     thread_id,
                     destination,
                     prompt,
+                    fallback_title,
                     effort,
                     result,
                     cancellation,

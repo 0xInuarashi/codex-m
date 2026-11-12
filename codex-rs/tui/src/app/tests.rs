@@ -2218,7 +2218,6 @@ async fn replayed_interrupted_turn_restores_queued_input_to_composer() {
 #[tokio::test]
 async fn token_usage_update_refreshes_status_line_with_runtime_context_window() {
     use crate::bottom_pane::StatusLineItem;
-    use crate::bottom_pane::footer_content::FooterContent;
 
     let mut app = make_test_app().await;
     app.chat_widget.setup_status_line(
@@ -2249,10 +2248,11 @@ async fn token_usage_update_refreshes_status_line_with_runtime_context_window() 
         app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
             token_usage_notification(thread_id, "turn-1", Some(window)),
         )));
-        assert!(matches!(
-            app.chat_widget.status_line_content(),
-            Some(FooterContent::HyperlinkLine(_))
-        ));
+        assert!(
+            app.chat_widget
+                .status_line_content()
+                .is_some_and(|status| status.as_native().is_some())
+        );
         let rendered = render_bottom_popup(&app.chat_widget, /*width*/ 60);
         assert!(
             rendered.lines().any(|row| row.trim() == expected),
@@ -4554,6 +4554,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
 
     keys!(toggle);
     assert_eq!(app.current_displayed_thread_id(), Some(side_thread_id));
+    assert!(!tui.has_deferred_thread_switch_clear());
     let wide = side_frame(&mut app, &mut tui, size)?;
     assert!(
         wide.contains(parent_row) && wide.contains(child_row),
@@ -4577,7 +4578,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
             .collect::<Vec<_>>()
             .join("\n")
     );
-    let sidebar_x = app.conversation_frame.chooser_area().unwrap().x;
+    let sidebar_x = app.conversation_frame.panel_area().unwrap().x;
     app.local_settings.tui.animations = true;
     keys!(KeyCode::Enter.into());
     assert!(!tui.has_deferred_thread_switch_clear());
@@ -4616,6 +4617,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
         };
         // Park an interaction on the parent so both hide shortcuts must clear it on return.
         keys!(prefix, main);
+        assert!(!tui.has_deferred_thread_switch_clear());
         app.transcript_view.begin_search();
         app.select_agent_thread(&mut tui, &mut app_server, side_thread_id)
             .await?;
@@ -5030,39 +5032,38 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     tokio::time::pause();
     keys!(prefix);
     side_frame(&mut app, &mut tui, even)?;
-    assert_eq!(app.conversation_frame.leader_hud, None);
-    tokio::time::advance(super::workspace_hud::REVEAL_DELAY).await;
+    assert_eq!(tui.shortcut_hud_area, None);
+    tokio::time::advance(crate::keymap::CHORD_REVEAL_DELAY).await;
     let composer = app.render_owned_transcript(&mut tui, even)?;
-    let panel_text = |app: &App, tui: &tui::Tui| {
-        let mut panel = ratatui::buffer::Buffer::empty(
-            app.conversation_frame
-                .leader_hud
-                .expect("visible shortcut panel"),
-        );
+    let panel_text = |tui: &tui::Tui| {
+        let mut panel =
+            ratatui::buffer::Buffer::empty(tui.shortcut_hud_area.expect("visible shortcut panel"));
         for pos in panel.area.positions() {
             panel[pos] = tui.terminal.previous_buffer()[pos].clone();
         }
         buffer_text(&panel)
     };
     app.transcript_view.jump_to_latest();
-    let hud = app
-        .conversation_frame
-        .leader_hud
-        .expect("visible shortcut panel");
+    let hud = tui.shortcut_hud_area.expect("visible shortcut panel");
     let scroll = mouse(MouseEventKind::ScrollUp, hud.left(), hud.top());
     boxed_future!(app.handle_tui_event(&mut tui, &mut app_server, scroll)).await?;
     app.render_owned_transcript(&mut tui, even)?;
     assert!(!app.transcript_view.is_following());
-    insta::assert_snapshot!("workspace_leader_hints", panel_text(&app, &tui));
+    insta::assert_snapshot!("workspace_leader_hints", panel_text(&tui));
     app.reconnect.offline = true;
     app.render_owned_transcript(&mut tui, even)?;
-    let offline = panel_text(&app, &tui);
+    let offline = panel_text(&tui);
     assert!(!offline.contains("Pane right") && offline.contains("Zoom pane"));
     app.reconnect.offline = false;
     let draft = app.chat_widget.composer_text_with_pending();
     keys!(KeyCode::Char('p').into());
     assert_eq!(app.render_owned_transcript(&mut tui, even)?, composer);
-    insta::assert_snapshot!("workspace_presets", panel_text(&app, &tui));
+    insta::assert_snapshot!("workspace_presets", panel_text(&tui));
+    let compact = Size::new(/*width*/ 80, /*height*/ 6);
+    tui.terminal = terminal_at(compact);
+    app.render_owned_transcript(&mut tui, compact)?;
+    insta::assert_snapshot!("workspace_presets_compact", panel_text(&tui));
+    tui.terminal = terminal_at(even);
     keys!(KeyCode::Esc.into());
     assert_eq!(app.chat_widget.composer_text_with_pending(), draft);
     tokio::time::resume();
@@ -5409,13 +5410,12 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
 
     tokio::time::pause();
     keys!(prefix);
-    tokio::time::advance(super::workspace_hud::REVEAL_DELAY).await;
+    tokio::time::advance(crate::keymap::CHORD_REVEAL_DELAY).await;
     side_frame(&mut app, &mut tui, even)?;
-    insta::assert_snapshot!("sidebar_tab_shortcuts", panel_text(&app, &tui));
+    insta::assert_snapshot!("sidebar_tab_shortcuts", panel_text(&tui));
     side_frame(&mut app, &mut tui, Size::new(even.width, /*height*/ 10))?;
-    let overlap = app
-        .conversation_frame
-        .leader_hud
+    let overlap = tui
+        .shortcut_hud_area
         .unwrap()
         .intersection(app.conversation_frame.chat_strip.unwrap());
     assert!(!overlap.is_empty());
@@ -5552,7 +5552,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
 
     keys!(prefix, chooser_key, prefix, KeyCode::Char('=').into());
     side_frame(&mut app, &mut tui, even)?;
-    assert_eq!(app.conversation_frame.chooser_area().unwrap().width, 100);
+    assert_eq!(app.conversation_frame.panel_area().unwrap().width, 100);
     keys!(prefix, KeyCode::Char('r').into(), KeyCode::Left.into());
     let frame = side_frame(&mut app, &mut tui, even)?;
     let (_, hint) = frame
@@ -5586,12 +5586,12 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     assert_eq!(strip.divider_area(), Some(Rect::new(target, 0, 1, 1)));
     keys!(prefix, chooser_key);
     side_frame(&mut app, &mut tui, even)?;
-    assert!(app.conversation_frame.chooser_area().is_some());
+    assert!(app.conversation_frame.panel_area().is_some());
     assert_eq!(divider_at(&tui, 4), target);
 
     // Closing from the chooser must not switch to the tab before confirmation.
     let chooser_focus = app.chooser_focus();
-    let chooser = app.conversation_frame.chooser_area().unwrap();
+    let chooser = app.conversation_frame.panel_area().unwrap();
     let close_x = (chooser.x..chooser.right())
         .rfind(|&x| tui.terminal.previous_buffer()[(x, chooser.y)].symbol() == "×")
         .expect("close button on the second tab");
@@ -5651,6 +5651,119 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     assert_eq!(app.current_displayed_thread_id(), Some(side_thread_id));
 
     app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn split_status_lines_reflow_across_focus_switches() -> Result<()> {
+    use crate::bottom_pane::StatusLineItem;
+    use ratatui::style::Modifier;
+    use ratatui::text::Line;
+
+    let (mut app, mut events, _ops) = make_test_app_with_channels().await;
+    let mut server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+    let primary = server.start_thread(&app.config).await?;
+    let main = primary.session.thread_id;
+    app.enqueue_primary_thread_session(primary.session, primary.turns)
+        .await?;
+    let side = ThreadId::new();
+    let channel = ThreadEventChannel::new(/*capacity*/ 1);
+    channel.store.lock().await.set_session(
+        test_thread_session(side, app.config.cwd.to_path_buf()),
+        Vec::new(),
+    );
+    app.thread_event_channels.insert(side, channel);
+    app.side_threads.insert(side, SideThreadState::new(main));
+    app.sidebar_mut().show(
+        sidebar::SidebarContent::Chat(side),
+        sidebar::PaneFocus::Main,
+    );
+    let mut tui = crate::tui::test_support::make_test_tui()?;
+    tui.set_owned_screen(/*owned*/ true)?;
+    drain_app_events(&mut app, &mut tui, &mut server, &mut events).await?;
+
+    let main_status = "MainStatusSummaryForThePrimaryWorkspaceContext MainStatusDetailsForThePrimaryWorkspaceContext";
+    let side_status = "SideStatusSummaryText SideStatusDetails";
+    let mut frames = Vec::new();
+    for (index, (focused, width, height)) in [
+        (main, 100, 24),
+        (side, 100, 24),
+        (main, 100, 24),
+        (main, 130, 24),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if app.current_displayed_thread_id() != Some(focused) {
+            app.select_agent_thread(&mut tui, &mut server, focused)
+                .await?;
+            drain_app_events(&mut app, &mut tui, &mut server, &mut events).await?;
+        }
+        assert_eq!(app.current_displayed_thread_id(), Some(focused));
+        enable_side_retention(&mut app)?;
+        app.local_settings.tui.animations = false;
+        let size = Size::new(width, height);
+        // Resize refreshes the active native status, so install the fixture after reflow.
+        side_frame(&mut app, &mut tui, size)?;
+        let (name, draft, status) = if focused == main {
+            ("Main", "main draft", main_status)
+        } else {
+            ("Side", "side draft", side_status)
+        };
+        app.chat_widget.setup_status_line(
+            vec![StatusLineItem::ModelName],
+            /*use_theme_colors*/ false,
+        );
+        app.chat_widget
+            .set_status_line(Some(Line::from(status).into()));
+        app.chat_widget.apply_external_edit(draft.into());
+        if index == 0 {
+            // Seed the main conversation before focusing the side chat.
+            continue;
+        }
+
+        let frame = side_frame(&mut app, &mut tui, size)?;
+        assert!(
+            frame.contains("main draft") && frame.contains("side draft"),
+            "{frame}"
+        );
+        let divider = app.conversation_frame.divider_area().expect("split pane");
+        let buffer = tui.terminal.previous_buffer();
+        let mut rows = vec![format!("{name} focused at {width}x{height}")];
+        for (prefix, start, end) in [
+            ("MainStatus", 0, divider.x),
+            ("SideStatus", divider.right(), width),
+        ] {
+            for y in 0..height {
+                let text: String = (start..end).map(|x| buffer[(x, y)].symbol()).collect();
+                if text.trim_start().starts_with(prefix) {
+                    let muted = buffer[(start + 2, y)].modifier.contains(Modifier::DIM);
+                    let style = if muted { "muted" } else { "normal" };
+                    rows.push(format!("{style} {}", text.trim()));
+                }
+            }
+        }
+        frames.push(rows.join("\n"));
+    }
+    insta::assert_snapshot!(frames.join("\n\n"), @"
+    Side focused at 100x24
+    muted MainStatusSummaryForThePrimaryWorkspaceContext
+    muted MainStatusDetailsForThePrimaryWorkspaceContext
+    normal SideStatusSummaryText
+    normal SideStatusDetails
+
+    Main focused at 100x24
+    normal MainStatusSummaryForThePrimaryWorkspaceContext
+    normal MainStatusDetailsForThePrimaryWorkspaceContext
+    muted SideStatusSummaryText
+    muted SideStatusDetails
+
+    Main focused at 130x24
+    normal MainStatusSummaryForThePrimaryWorkspaceContext
+    normal MainStatusDetailsForThePrimaryWorkspaceContext
+    muted SideStatusSummaryText SideStatusDetails
+    ");
+    server.shutdown().await?;
     Ok(())
 }
 
@@ -8983,6 +9096,7 @@ async fn make_test_app() -> Box<App> {
         feedback_audience: FeedbackAudience::External,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         app_server_target: crate::AppServerTarget::Embedded,
+        app_server_backend_id: None,
         reconnect: Default::default(),
         pending_right_click_paste: None,
         right_click_paste_environment: super::right_click_paste::PasteEnvironment {
@@ -9008,6 +9122,7 @@ async fn make_test_app() -> Box<App> {
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
         pending_server_profiles: HashMap::new(),
+        backend_registry: Default::default(),
         agents_overview: Default::default(),
         side_threads: HashMap::new(),
         saved_openings: Default::default(),
@@ -9123,6 +9238,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             feedback_audience: FeedbackAudience::External,
             environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
             app_server_target: crate::AppServerTarget::Embedded,
+            app_server_backend_id: None,
             reconnect: Default::default(),
             pending_right_click_paste: None,
             right_click_paste_environment: super::right_click_paste::PasteEnvironment {
@@ -9148,6 +9264,7 @@ pub(super) async fn make_test_app_with_channels() -> (
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             pending_server_profiles: HashMap::new(),
+            backend_registry: Default::default(),
             agents_overview: Default::default(),
             side_threads: HashMap::new(),
             saved_openings: Default::default(),
@@ -9878,7 +9995,7 @@ async fn copy_picker_opening_preserves_terminal_scrollback_without_reflow() {
             !matches!(
                 event,
                 AppEvent::ClearUi { .. }
-                    | AppEvent::ClearUiAndSubmitUserMessage { .. }
+                    | AppEvent::ImplementPlanInFreshSession { .. }
                     | AppEvent::InsertHistoryCell(_)
                     | AppEvent::ConsolidateAgentMessage { .. }
             ),
@@ -12871,6 +12988,7 @@ async fn inactive_thread_settings_notification_updates_cached_collaboration_mode
         thread_id: inactive_thread_id.to_string(),
         thread_settings: ThreadSettings {
             disabled_plugin_ids: Vec::new(),
+            environments: None,
             cwd: test_absolute_path("/tmp/thread-settings"),
             approval_policy: AskForApproval::OnRequest,
             approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,

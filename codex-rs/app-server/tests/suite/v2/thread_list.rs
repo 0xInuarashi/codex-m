@@ -1082,7 +1082,7 @@ async fn thread_search_matches_json_escaped_content() -> Result<()> {
     let codex_home = TempDir::new()?;
     create_minimal_config(codex_home.path())?;
 
-    let search_term = r#"quoted "needle" \ path"#;
+    let search_term = "find  \"needle\"\nunder\tC:\\docs";
     let thread_id = create_fake_rollout(
         codex_home.path(),
         "2025-01-02T10-00-00",
@@ -1111,7 +1111,7 @@ async fn thread_search_matches_json_escaped_content() -> Result<()> {
 
     assert_eq!(data.len(), 1);
     assert_eq!(data[0].thread.id, thread_id);
-    assert_eq!(data[0].snippet, search_term);
+    assert_eq!(data[0].snippet, r#"find "needle" under C:\docs"#);
 
     Ok(())
 }
@@ -2614,6 +2614,52 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
     );
     assert!(data.iter().all(|thread| thread.recency_at.is_some()));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_cold_ascending_recency_returns_next_cursor() -> Result<()> {
+    let home = TempDir::new()?;
+    create_minimal_config(home.path())?;
+    let mut server = init_mcp(home.path()).await?;
+    // Finish startup backfill before adding the two unindexed rollouts.
+    list_threads(
+        &mut server,
+        /*cursor*/ None,
+        Some(1),
+        /*providers*/ None,
+        /*source_kinds*/ None,
+        /*archived*/ None,
+    )
+    .await?;
+    let ids = create_fake_rollouts(
+        home.path(),
+        /*count*/ 2,
+        |_| "mock_provider",
+        |i| {
+            timestamp_at(
+                /*year*/ 2025, /*month*/ 1, /*day*/ 1, /*hour*/ 10, i as u32,
+                /*second*/ 0,
+            )
+        },
+        "Cold thread",
+    )?;
+
+    let mut params: codex_app_server_protocol::ThreadListParams = serde_json::from_value(json!({
+        "limit": 1, "sortKey": "recency_at", "sortDirection": "asc", "modelProviders": ["mock_provider"]
+    }))?;
+    for (index, id) in ids.into_iter().enumerate() {
+        let page: ThreadListResponse = server
+            .request(|request_id| ClientRequest::ThreadList {
+                request_id,
+                params: params.clone(),
+            })
+            .await?;
+        let page_ids: Vec<_> = page.data.into_iter().map(|thread| thread.id).collect();
+        assert_eq!(page_ids, [id]);
+        assert_eq!(page.next_cursor.is_some(), index == 0);
+        params.cursor = page.next_cursor;
+    }
     Ok(())
 }
 

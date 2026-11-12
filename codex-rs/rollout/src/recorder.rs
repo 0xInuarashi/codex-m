@@ -117,7 +117,7 @@ pub enum RolloutRecorderParams {
         history_mode: ThreadHistoryMode,
         history_base: Option<HistoryPosition>,
         subagent_history_start_ordinal: Option<u64>,
-        initial_window_id: Option<String>,
+        initial_window_id: Option<codex_protocol::ContextWindowId>,
     },
     Resume {
         path: PathBuf,
@@ -373,7 +373,10 @@ impl RolloutRecorderParams {
         self
     }
 
-    pub fn with_initial_window_id(mut self, initial_window_id: String) -> Self {
+    pub fn with_initial_window_id(
+        mut self,
+        initial_window_id: codex_protocol::ContextWindowId,
+    ) -> Self {
         if let Self::Create {
             initial_window_id: window_id,
             ..
@@ -609,9 +612,15 @@ impl RolloutRecorder {
         };
         let fs_page = match sort_direction {
             SortDirection::Asc => {
+                // SQLite needs one extra indexed row to produce a recency cursor.
+                let scan_size = if sort_key == ThreadSortKey::RecencyAt && state_db_ctx.is_some() {
+                    page_size.saturating_add(1)
+                } else {
+                    page_size
+                };
                 list_threads_from_files_asc(
                     codex_home,
-                    page_size,
+                    scan_size,
                     cursor,
                     sort_key,
                     file_config,
@@ -1374,8 +1383,8 @@ fn page_from_filesystem_scan(
     sort_key: ThreadSortKey,
 ) -> ThreadsPage {
     match sort_direction {
-        SortDirection::Asc => page,
-        SortDirection::Desc => truncate_fs_page(page, page_size, sort_key),
+        SortDirection::Asc if sort_key != ThreadSortKey::RecencyAt => page,
+        SortDirection::Asc | SortDirection::Desc => truncate_fs_page(page, page_size, sort_key),
     }
 }
 

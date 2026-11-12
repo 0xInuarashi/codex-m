@@ -317,7 +317,7 @@ pub(crate) struct CapturedSideDisplay {
     pub(crate) active: Option<Box<dyn HistoryCell>>,
     pub(crate) auxiliary: Vec<crate::terminal_hyperlinks::HyperlinkLine>,
     pub(crate) draft: Box<crate::bottom_pane::TextArea>,
-    pub(crate) status: Option<String>,
+    pub(crate) status_line: Option<crate::bottom_pane::StatusLine>,
     pub(crate) work: Option<CapturedSideWork>,
     pub(crate) last_completed_agent_message: Option<(String, String)>,
     pub(crate) cwd: AbsolutePathBuf,
@@ -387,6 +387,7 @@ pub(crate) enum AppEvent {
     },
     /// Create an empty thread from the command center.
     NewAgentsOverviewSession {
+        backend_id: Option<crate::backend_id::BackendId>,
         cwd: Option<AbsolutePathBuf>,
     },
     /// Update the agents overview after a background thread listing finishes.
@@ -400,6 +401,7 @@ pub(crate) enum AppEvent {
     },
     /// Create an empty session in a worktree from the selected project's default branch.
     NewAgentsOverviewWorktree {
+        backend_id: Option<crate::backend_id::BackendId>,
         cwd: Option<AbsolutePathBuf>,
     },
     AgentsOverviewWorktreeCreated(Result<crate::app::PendingWorktree, String>),
@@ -439,6 +441,7 @@ pub(crate) enum AppEvent {
         thread_id: ThreadId,
         destination: ThreadTitleDestination,
         prompt: String,
+        fallback_title: Option<String>,
         effort: Option<ReasoningEffort>,
         result: Result<String, String>,
     },
@@ -772,12 +775,9 @@ pub(crate) enum AppEvent {
         enabled: bool,
     },
 
-    /// Clear the current context, start a fresh session, and submit an initial user message.
-    ///
-    /// This is the Plan Mode handoff path: the previous thread remains resumable, but the model
-    /// sees only the explicit prompt carried in `text` once the new session is configured.
-    ClearUiAndSubmitUserMessage {
-        text: String,
+    /// Start a fresh session with a reference to the approved plan file.
+    ImplementPlanInFreshSession {
+        plan: String,
     },
 
     /// Open the resume picker inside the running TUI session.
@@ -1435,6 +1435,13 @@ pub(crate) enum AppEvent {
         result: Result<StartedRealtimeWebrtcSession, RealtimeWebrtcStartupFailure>,
     },
 
+    /// Provider negotiation completed for this local voice startup attempt.
+    RealtimeCallCreated {
+        thread_id: ThreadId,
+        attempt_id: u64,
+        result: color_eyre::Result<crate::realtime_call::CreatedCall>,
+    },
+
     /// Result of establishing the WebRTC connection for an active voice attempt.
     RealtimeWebrtcConnected {
         thread_id: ThreadId,
@@ -1512,6 +1519,12 @@ pub(crate) enum AppEvent {
     /// Save the voice for subsequent conversations through the app server.
     PersistRealtimeVoiceSelection {
         voice: codex_protocol::protocol::RealtimeVoice,
+    },
+
+    /// Toggle the service tier staged for the next Cloud submission.
+    ToggleCloudServiceTier {
+        thread_id: ThreadId,
+        tier: String,
     },
 
     /// Persist the selected service tier to the appropriate config.

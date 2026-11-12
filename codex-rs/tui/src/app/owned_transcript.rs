@@ -38,7 +38,6 @@ pub(super) struct ConversationFrame {
     pub(super) sidebar: Option<sidebar::SidebarLayout>,
     pub(super) chat_strip: Option<Rect>,
     pub(super) sidebar_input: Option<sidebar::SidebarInputState>,
-    pub(super) leader_hud: Option<Rect>,
     pub(super) close_buttons: [Rect; 2],
     /// A dialog can obscure neighboring content in the terminal's completed buffer.
     behind_dialog: Option<ratatui::buffer::Buffer>,
@@ -46,11 +45,6 @@ pub(super) struct ConversationFrame {
 }
 
 impl ConversationFrame {
-    pub(super) fn hud_contains(&self, mouse: crossterm::event::MouseEvent) -> bool {
-        self.leader_hud
-            .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
-    }
-
     pub(super) fn has_caller_inset(&self) -> bool {
         self.inset.is_some() && self.sidebar.is_none() && self.chat_strip.is_none()
     }
@@ -62,20 +56,20 @@ impl ConversationFrame {
         }
     }
 
-    pub(super) fn chooser_covers_transcript(&self) -> bool {
-        matches!(self.sidebar, Some(sidebar::SidebarLayout::Chooser { main, .. }) if main.is_empty())
+    pub(super) fn panel_covers_transcript(&self) -> bool {
+        matches!(self.sidebar, Some(sidebar::SidebarLayout::Panel { main, .. }) if main.is_empty())
     }
 
-    pub(super) fn chooser_area(&self) -> Option<Rect> {
+    pub(super) fn panel_area(&self) -> Option<Rect> {
         match self.sidebar {
-            Some(sidebar::SidebarLayout::Chooser { sidebar, .. }) => Some(sidebar),
+            Some(sidebar::SidebarLayout::Panel { sidebar, .. }) => Some(sidebar),
             _ => None,
         }
     }
 
     pub(super) fn sidebar_tab_strip(&self) -> Option<Rect> {
         self.chat_strip.or_else(|| {
-            self.chooser_area()
+            self.panel_area()
                 .map(|area| side_pane::tab_and_body(area)[0])
         })
     }
@@ -275,7 +269,7 @@ impl App {
             Some(sidebar::SidebarLayout::Chat(panes)) => {
                 (Some(panes.focused), Some(panes.tab_strip))
             }
-            Some(sidebar::SidebarLayout::Chooser { main, .. }) => {
+            Some(sidebar::SidebarLayout::Panel { main, .. }) => {
                 ((!main.is_empty()).then_some(*main), None)
             }
             None if chat == TabState::Active
@@ -312,10 +306,13 @@ impl App {
                 .take()
                 .unwrap_or_else(|| tui.terminal.previous_buffer().clone())
         });
-        let hud = self.workspace_hud(tui, screen_size.into());
+        let mut hud = self.workspace_hud(tui, screen_size.into());
+        if let Some(hud) = &mut hud {
+            hud.viewport = caller_inset;
+        }
         prepared.floating_shortcuts = hud.is_some();
         let mut painted = PaintedConversation::default();
-        tui.draw(screen_size.height, |frame| {
+        tui.draw_with_shortcut_hud(screen_size.height, hud, |frame| {
             if let Some(backdrop) = backdrop {
                 let viewport = frame.area();
                 frame.image_placements.extend(
@@ -345,7 +342,7 @@ impl App {
                         );
                     }
                 }
-                Some(sidebar::SidebarLayout::Chooser { sidebar, focus, .. }) => {
+                Some(sidebar::SidebarLayout::Panel { sidebar, focus, .. }) => {
                     let focused = *focus == PaneFocus::Sidebar;
                     let resize_hint = self.pane_resize.map(|_| side_pane::RESIZE_HINT);
                     if let Some(creation) = self.sidebar().and_then(|pane| pane.creation.as_ref()) {
@@ -460,7 +457,7 @@ impl App {
                 let viewport = frame.area();
                 let column = self
                     .conversation_frame
-                    .chooser_area()
+                    .panel_area()
                     .or(strip)
                     .unwrap_or(viewport);
                 let area = Rect {
@@ -476,16 +473,6 @@ impl App {
                 self.conversation_frame.close_buttons = buttons;
             }
             self.paint_centered_dialog(frame);
-            self.conversation_frame.leader_hud = hud.map(|hud| {
-                let area = hud.render_overlay(frame.area(), frame.buffer);
-                if frame.cursor_position.is_some_and(|pos| area.contains(pos)) {
-                    frame.cursor_position = None;
-                }
-                frame
-                    .image_placements
-                    .retain(|image| !area.intersects(image.area));
-                area
-            });
         })?;
         self.finish_conversation(tui, painted)
     }
@@ -594,13 +581,10 @@ impl App {
         // Painting those rows tells us whether newer activity is still hidden,
         // which can change the footer hint and the composer's measured height.
         let footer = view.footer_with_navigation(footer_width, motion, latest_navigation);
-        // Allow up to two-thirds of the pane, or eight rows on short panes when they fit.
-        let max_composer_height = ((u32::from(area.height) * 2 / 3) as u16)
-            .max(8)
-            .min(area.height);
+        let max_composer_height = side_pane::composer_height_limit(area.height);
         let unfocused = matches!(
             self.conversation_frame.sidebar,
-            Some(sidebar::SidebarLayout::Chooser {
+            Some(sidebar::SidebarLayout::Panel {
                 focus: PaneFocus::Sidebar,
                 ..
             })
@@ -664,17 +648,8 @@ impl App {
                 && view.composer_gap_has_content(transcript_width, prepared.composer_hint.as_ref(), now);
         }
         // Refresh the hint using the rows just painted.
-        let mut footer = prompt_footer
+        let footer = prompt_footer
             .or_else(|| view.footer_with_navigation(footer_width, motion, latest_navigation));
-        if let Some(footer) = footer.as_mut().filter(|footer| footer.is_interactive)
-            && self.key_chord_matcher.workspace_leader().is_none()
-            && let Some(items) = self
-                .key_chord_matcher
-                .pending_hint_items(&self.keymap.chords, footer_width)
-            && let Some(progress) = footer.text.lines.last_mut()
-        {
-            *progress = crate::bottom_pane::footer_hint_items_line(&items);
-        }
         let bottom = chat_widget.bottom_pane_renderable(ComposerRenderOptions {
             footer: footer.as_ref(),
             composer_gap: composer_gap.as_ref(),
@@ -899,7 +874,7 @@ impl App {
             }
             if self
                 .conversation_frame
-                .chooser_area()
+                .panel_area()
                 .is_some_and(|area| area.contains((mouse.column, mouse.row).into()))
             {
                 return Ok(true);

@@ -94,6 +94,9 @@ pub(crate) async fn prepare_agent_spawn_config(
     if shares_service_tier {
         apply_spawn_agent_service_tier(session, &mut config).await?;
     }
+    if let Some(tier) = &config.model_routing.subagent_service_tier {
+        config.service_tier = Some(tier.clone());
+    }
     apply_spawn_agent_runtime_overrides(&mut config, turn)?;
 
     // Remember an applied configured default so cold reload reapplies its restrictions.

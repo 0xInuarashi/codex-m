@@ -1,3 +1,11 @@
+# codex-m
+
+Fork of [openai/codex](https://github.com/openai/codex) with independent model,
+reasoning effort, and service-tier routing for sub-agents and compaction.
+See [CODEX-M.md](CODEX-M.md) for configuration, build, installation, and validation details.
+
+---
+
 <p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
 <p align="center">
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />

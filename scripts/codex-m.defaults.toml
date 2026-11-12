@@ -1,0 +1,11 @@
+# codex-m-specific defaults. The installed codex keeps using its own defaults.
+service_tier = "fast"
+[agents]
+default_subagent_model = "gpt-6.1-sol"
+default_subagent_reasoning_effort = "medium"
+
+[model_routing]
+subagent_service_tier = "ultrafast"
+compaction_model = "gpt-6.1-sol"
+compaction_service_tier = "ultrafast"
+compaction_reasoning_effort = "medium"

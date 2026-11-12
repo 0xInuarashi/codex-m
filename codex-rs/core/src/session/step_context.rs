@@ -57,6 +57,24 @@ pub(crate) struct StepContext {
 }
 
 impl StepContext {
+    /// Apply compaction-only routing without publishing a main-thread model change.
+    pub(crate) async fn for_compaction(&self, session: &super::session::Session) -> Self {
+        let routing = &self.turn.config.model_routing;
+        if routing.compaction_model.is_none()
+            && routing.compaction_service_tier.is_none()
+            && routing.compaction_reasoning_effort.is_none()
+        {
+            return self.clone();
+        }
+        let turn = self.turn.for_compaction(session).await;
+        let settings = Arc::clone(&turn.initial_settings);
+        let mut result = self.clone();
+        result.session_telemetry = settings.telemetry(&self.session_telemetry);
+        result.settings = settings;
+        result.turn = Arc::new(turn);
+        result
+    }
+
     /// Feature that selects the tool layout of new windows on this route.
     pub(crate) fn incremental_tools_feature(&self) -> Option<Feature> {
         if self.settings.model_info.use_responses_lite {

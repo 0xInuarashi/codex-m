@@ -269,6 +269,22 @@ async fn run_compact_task_inner_impl(
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<String> {
+    let turn_context = if turn_context.config.model_routing.compaction_model.is_some()
+        || turn_context
+            .config
+            .model_routing
+            .compaction_service_tier
+            .is_some()
+        || turn_context
+            .config
+            .model_routing
+            .compaction_reasoning_effort
+            .is_some()
+    {
+        Arc::new(turn_context.for_compaction(&sess).await)
+    } else {
+        turn_context
+    };
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
     sess.emit_turn_item_started(&turn_context, &compaction_item)
         .await;
@@ -851,11 +867,20 @@ async fn drain_to_completed(
             prompt,
             turn_context.model_info(),
             &turn_context.session_telemetry,
-            sess.reasoning_effort_for_request(
-                &turn_context.initial_settings,
-                RequestEffortUsage::Compaction,
-            )
-            .await,
+            if turn_context
+                .config
+                .model_routing
+                .compaction_reasoning_effort
+                .is_some()
+            {
+                turn_context.initial_settings.effective_reasoning_effort()
+            } else {
+                sess.reasoning_effort_for_request(
+                    &turn_context.initial_settings,
+                    RequestEffortUsage::Compaction,
+                )
+                .await
+            },
             turn_context.reasoning_summary(),
             turn_context.config.service_tier.clone(),
             responses_metadata,

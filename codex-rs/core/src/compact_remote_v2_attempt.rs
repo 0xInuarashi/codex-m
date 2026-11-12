@@ -39,6 +39,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 pub(super) struct RemoteCompactV2Attempt {
+    pub(super) compaction_model_hash: Option<String>,
     pub(super) rejected_audio_file_ids: BTreeSet<String>,
     pub(super) input_goal_ids: HashSet<ResponseItemId>,
     pub(super) trace_input_history: Option<Vec<ResponseItem>>,
@@ -80,6 +81,8 @@ pub(super) async fn run_remote_compact_v2_attempt(
     analytics_details: &mut CompactionAnalyticsDetails,
     input: RemoteCompactV2AttemptInput<'_>,
 ) -> CodexResult<RemoteCompactV2Attempt> {
+    let routed_step = Arc::new(step_context.for_compaction(sess).await);
+    let step_context = &routed_step;
     let turn_context = &step_context.turn;
     let mut owned_client_session = None;
     let (
@@ -266,6 +269,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
         }
     };
     Ok(RemoteCompactV2Attempt {
+        compaction_model_hash: model_info.comp_hash.clone(),
         rejected_audio_file_ids: unavailable,
         input_goal_ids,
         trace_input_history,

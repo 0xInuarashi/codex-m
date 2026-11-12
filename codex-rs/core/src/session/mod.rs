@@ -4316,10 +4316,16 @@ impl Session {
             )
         };
         if self.inherits_root_service_tier(&turn_context.session_source) {
-            let root_service_tier = tokio::select! {
-                biased;
-                tier = crate::agent::host::service_tier(self, settings.selected().service_tier.clone()) => tier,
-                _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+            let root_service_tier = if let Some(tier) =
+                &turn_context.config.model_routing.subagent_service_tier
+            {
+                Some(tier.clone())
+            } else {
+                tokio::select! {
+                    biased;
+                    tier = crate::agent::host::service_tier(self, settings.selected().service_tier.clone()) => tier,
+                    _ = cancellation_token.cancelled() => return Err(CodexErr::TurnAborted),
+                }
             };
             if settings.selected().service_tier != root_service_tier {
                 let mut selected = settings.selected().clone();

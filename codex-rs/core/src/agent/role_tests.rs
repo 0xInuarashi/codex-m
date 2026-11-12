@@ -824,3 +824,38 @@ fn built_in_config_file_contents_resolves_explorer_only() {
         None
     );
 }
+
+#[tokio::test]
+async fn role_overrides_independent_service_tier() {
+    let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.model_routing.subagent_service_tier = Some("ultrafast".to_string());
+    let role_path = write_role_config(
+        &home,
+        "tiered-role.toml",
+        r#"developer_instructions = "Stay focused"
+service_tier = "priority"
+"#,
+    )
+    .await;
+    config.agent_roles.insert(
+        "custom".to_string(),
+        AgentRoleConfig {
+            description: None,
+            config_file: Some(role_path),
+            nickname_candidates: None,
+        },
+    );
+
+    apply_role_to_config(&mut config, Some("custom"))
+        .await
+        .expect("custom role should apply");
+
+    assert_eq!(
+        config.model_routing.subagent_service_tier.as_deref(),
+        Some("priority")
+    );
+    assert_eq!(
+        config.service_tier,
+        Some(ServiceTier::Fast.request_value().to_string())
+    );
+}

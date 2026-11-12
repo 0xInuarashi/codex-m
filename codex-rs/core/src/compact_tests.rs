@@ -917,3 +917,39 @@ fn assemble_compaction_history_keeps_compaction_last() {
     ];
     assert_eq!(refreshed, expected);
 }
+
+#[tokio::test]
+async fn configured_compaction_model_does_not_change_main_model() {
+    let (session, turn, _events) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        |config| {
+            config.model = Some("gpt-5.2".to_string());
+            config.model_reasoning_effort =
+                Some(codex_protocol::openai_models::ReasoningEffort::High);
+            config.model_routing.compaction_reasoning_effort =
+                Some(codex_protocol::openai_models::ReasoningEffort::Low);
+            config.model_routing.compaction_model = Some("gpt-5.5".to_string());
+            config.model_routing.compaction_service_tier = Some("priority".to_string());
+        },
+    )
+    .await;
+    let original_model = turn.model_info().slug.clone();
+    let original_tier = turn.initial_settings.service_tier.clone();
+    let routed = turn.for_compaction(&session).await;
+    assert_eq!(routed.model_info().slug, "gpt-5.5");
+    assert_eq!(
+        routed.reasoning_effort(),
+        Some(&codex_protocol::openai_models::ReasoningEffort::Low)
+    );
+    assert_eq!(
+        turn.reasoning_effort(),
+        Some(&codex_protocol::openai_models::ReasoningEffort::High)
+    );
+    assert_eq!(
+        routed.initial_settings.service_tier.as_deref(),
+        Some("priority")
+    );
+    assert_eq!(turn.model_info().slug, original_model);
+    assert_eq!(turn.initial_settings.service_tier, original_tier);
+}

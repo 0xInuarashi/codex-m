@@ -297,13 +297,23 @@ async fn run_remote_compaction_request_v2(
     submitted_audio: Option<&crate::context_manager::rejected_audio::SubmittedFileAudio>,
 ) -> CodexResult<RemoteCompactionV2Output> {
     let turn_context = &step_context.turn;
+    tracing::info!(target: "codex_m", model = %step_context.settings.model_info.slug,
+        service_tier = ?step_context.settings.service_tier, "compaction routing");
     let client_session = match transport {
         CompactionRequestTransport::Background(turn_state, auth_owner) => {
             let settings = &step_context.settings;
             let cancellation = crate::session::async_compaction::shutdown_cancellation(sess).await;
-            let effort = sess
-                .reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
-                .await;
+            let effort = if turn_context
+                .config
+                .model_routing
+                .compaction_reasoning_effort
+                .is_some()
+            {
+                settings.effective_reasoning_effort()
+            } else {
+                sess.reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
+                    .await
+            };
             let trace = InferenceTraceContext::disabled();
             // Replay the routing token without letting this request change foreground routing.
             let turn_state = Arc::new(turn_state.clone().map(OnceLock::from).unwrap_or_default());
@@ -340,8 +350,17 @@ async fn run_remote_compaction_request_v2(
                 prompt,
                 &settings.model_info,
                 &turn_context.session_telemetry,
-                sess.reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
-                    .await,
+                if turn_context
+                    .config
+                    .model_routing
+                    .compaction_reasoning_effort
+                    .is_some()
+                {
+                    settings.effective_reasoning_effort()
+                } else {
+                    sess.reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
+                        .await
+                },
                 settings.reasoning_summary,
                 step_context.settings.service_tier.clone(),
                 responses_metadata,

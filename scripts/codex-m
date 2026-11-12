@@ -1,0 +1,27 @@
+#!/usr/bin/env python3
+"""Launch the separate codex-m binary with its own editable TOML defaults."""
+import json
+import os
+from pathlib import Path
+import sys
+import tomllib
+
+home = Path.home()
+config_path = home / '.config/codex-m/config.toml'
+config = tomllib.loads(config_path.read_text()) if config_path.exists() else {}
+binary = home / '.local/lib/codex-m/codex'
+if not binary.is_file():
+    sys.exit(f'codex-m binary is not installed: {binary}')
+# Explicit CLI overrides appear last and therefore override these defaults.
+def flatten(table, prefix=''):
+    for key, value in table.items():
+        name = f'{prefix}.{key}' if prefix else key
+        if isinstance(value, dict):
+            yield from flatten(value, name)
+        else:
+            yield '-c'
+            yield f'{name}={json.dumps(value, ensure_ascii=False)}'
+args = [str(binary), *flatten(config), *sys.argv[1:]]
+if Path.cwd() == home and not any(a in ('-C', '--cd') or a.startswith('--cd=') for a in sys.argv[1:]):
+    os.chdir('/repos')
+os.execv(binary, args)

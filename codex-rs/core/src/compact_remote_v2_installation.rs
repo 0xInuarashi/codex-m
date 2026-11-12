@@ -174,6 +174,7 @@ async fn build_and_install_compaction(
         (attempt, compaction_turn_context, None)
     };
     let RemoteCompactV2Attempt {
+        compaction_model_hash,
         rejected_audio_file_ids,
         input_goal_ids,
         trace_input_history,
@@ -249,7 +250,7 @@ async fn build_and_install_compaction(
             window_number,
             window_ids,
             compaction_response_id: Some(compaction_response_id),
-            compaction_model_hash: compaction_turn_context.model_info().comp_hash.clone(),
+            compaction_model_hash,
             reviewer_compaction_hash,
         };
         sess.replace_compacted_history(

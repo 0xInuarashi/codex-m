@@ -834,6 +834,39 @@ impl TurnContext {
             && self.config.orchestrator_mcp_enabled
     }
 
+    /// Resolve a separate compaction request without changing the live thread model.
+    pub(crate) async fn for_compaction(&self, session: &Session) -> Self {
+        let routing = &self.config.model_routing;
+        let model = routing
+            .compaction_model
+            .clone()
+            .unwrap_or_else(|| self.model_info().slug.clone());
+        let mut turn = self
+            .with_model(model, &session.services.models_manager)
+            .await;
+        let mut selected = turn.initial_settings.selected().clone();
+        if let Some(effort) = &routing.compaction_reasoning_effort {
+            selected.collaboration_mode =
+                selected
+                    .collaboration_mode
+                    .with_updates(None, Some(Some(effort.clone())), None);
+        }
+        if let Some(tier) = &routing.compaction_service_tier {
+            selected.service_tier = Some(tier.clone());
+        }
+        let settings = Arc::new(ResolvedStepSettings::new(
+            Arc::new(selected),
+            Arc::clone(turn.model_info()),
+            &turn.config.features,
+        ));
+        let config = Arc::make_mut(&mut turn.config);
+        config.service_tier = settings.service_tier.clone();
+        config.model_reasoning_effort = settings.reasoning_effort().cloned();
+        turn.session_telemetry = settings.telemetry(&self.session_telemetry);
+        turn.initial_settings = settings;
+        turn
+    }
+
     pub(crate) async fn with_model(
         &self,
         model: String,

@@ -166,6 +166,8 @@ pub struct FeatureToggleToml {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ConfigToml {
+    /// Optional codex-m routing overrides; omitted fields preserve upstream behavior.
+    pub model_routing: Option<ModelRoutingToml>,
     /// Optional override of model selection.
     pub model: Option<String>,
     /// Default Daybreak preference for new threads and non-interactive turns.
@@ -1201,5 +1203,42 @@ credential_file = "{credential_file}"
                 "model_providers.gcp: provider credential_file must be an absolute path"
             ));
         }
+    }
+}
+
+/// Independent routing for delegated work and context summarization.
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRoutingToml {
+    pub subagent_service_tier: Option<String>,
+    pub compaction_model: Option<String>,
+    pub compaction_service_tier: Option<String>,
+    pub compaction_reasoning_effort: Option<ReasoningEffort>,
+}
+
+#[cfg(test)]
+mod model_routing_tests {
+    use super::*;
+
+    #[test]
+    fn routing_is_opt_in_and_parses_independent_preferences() {
+        let defaults: ConfigToml = toml::from_str("").unwrap();
+        assert!(defaults.model_routing.is_none());
+        let configured: ConfigToml = toml::from_str(
+            r#"
+[model_routing]
+subagent_service_tier = "ultrafast"
+compaction_model = "gpt-6.1-sol"
+compaction_service_tier = "ultrafast"
+"#,
+        )
+        .unwrap();
+        let routing = configured.model_routing.unwrap();
+        assert_eq!(routing.subagent_service_tier.as_deref(), Some("ultrafast"));
+        assert_eq!(routing.compaction_model.as_deref(), Some("gpt-6.1-sol"));
+        assert_eq!(
+            routing.compaction_service_tier.as_deref(),
+            Some("ultrafast")
+        );
     }
 }

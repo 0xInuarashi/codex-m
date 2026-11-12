@@ -3333,6 +3333,25 @@
       },
       "type": "object"
     },
+    "ModelRoutingToml": {
+      "additionalProperties": false,
+      "description": "Independent routing for delegated work and context summarization.",
+      "properties": {
+        "compaction_model": {
+          "type": "string"
+        },
+        "compaction_reasoning_effort": {
+          "$ref": "#/definitions/ReasoningEffort"
+        },
+        "compaction_service_tier": {
+          "type": "string"
+        },
+        "subagent_service_tier": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
     "MultiAgentV2ConfigToml": {
       "additionalProperties": false,
       "properties": {
@@ -8784,6 +8803,14 @@
     },
     "model_reasoning_summary": {
       "$ref": "#/definitions/ReasoningSummary"
+    },
+    "model_routing": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/ModelRoutingToml"
+        }
+      ],
+      "description": "Optional codex-m routing overrides; omitted fields preserve upstream behavior."
     },
     "model_verbosity": {
       "allOf": [

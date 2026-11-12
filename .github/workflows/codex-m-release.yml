@@ -28,6 +28,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     env:
       TARGET: x86_64-unknown-linux-musl
+      CODEX_MUSL_RELEASE_LINK_FLAGS: '1'
       CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
@@ -64,6 +65,7 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: '0.14.0'
+          use-cache: false
       - name: Configure upstream musl toolchain
         run: bash .github/scripts/install-musl-build-tools.sh
       - uses: ./.github/actions/setup-rusty-v8

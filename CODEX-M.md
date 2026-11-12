@@ -81,7 +81,8 @@ RUST_MIN_STACK=33554432 cargo test -p codex-core --lib --profile dev-small compa
 
 The `Sync codex-m with upstream` GitHub Actions workflow checks `openai/codex/main`
 every six hours and can also be run manually. It merges upstream into an isolated
-runner checkout of `codex-m/sol-ultrafast`, builds the three executables, and runs
+runner checkout of `codex-m/sol-ultrafast`, refreshes workspace entries in the lockfile
+for the fork's package version, builds the three executables, and runs
 routing, compaction, and updater regression tests. Only a successful merge and
 validation are pushed. Conflicts, failed checks, or a concurrent push stop the run;
 the published fork is unchanged. Inspect failed runs in the repository's Actions

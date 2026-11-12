@@ -60,6 +60,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libcap-dev libasound2-dev bubblewrap clang cmake protobuf-compiler
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Refresh fork workspace versions in the lockfile
+        if: steps.merge.outputs.changed == 'true'
+        working-directory: codex-rs
+        run: |
+          # New upstream workspace crates inherit codex-m's package version.
+          # Preserve already-locked external dependencies while updating workspace entries.
+          cargo update --workspace
+          git add Cargo.lock
+          if ! git diff --cached --quiet; then
+            git commit -m 'Refresh fork workspace lockfile after upstream merge'
+          fi
       - name: Build and test the merged fork
         if: steps.merge.outputs.changed == 'true'
         run: python3 scripts/build-codex-m.py --test

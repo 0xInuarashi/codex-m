@@ -48,9 +48,17 @@ jobs:
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
           sudo apt-get update
           sudo apt-get install -y protobuf-compiler cmake libasound2-dev zstd
+      - name: Read upstream Rust toolchain
+        id: rust_toolchain
+        run: |
+          python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          import pathlib, tomllib
+          version = tomllib.loads(pathlib.Path('codex-rs/rust-toolchain.toml').read_text())['toolchain']['channel']
+          print(f'version={version}')
+          PYTHON
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
         with:
-          toolchain: '1.95.0'
+          toolchain: ${{ steps.rust_toolchain.outputs.version }}
           targets: x86_64-unknown-linux-musl
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
@@ -113,7 +121,7 @@ jobs:
           path: |
             dist/codex-package-*.tar.gz
             dist/codex-package_SHA256SUMS
-          retention-days: 7
+          retention-days: 1
   publish:
     needs: [checks, linux]
     runs-on: ubuntu-24.04
@@ -130,3 +138,18 @@ jobs:
           RELEASE_VERSION: ${{ needs.linux.outputs.version }}
         run: |
           gh release create "rust-v$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest --title "codex-m $RELEASE_VERSION" --notes "Linux x86_64 native musl build. Install with the install.sh script on main. Source: $GITHUB_SHA" dist/codex-package-*.tar.gz dist/codex-package_SHA256SUMS
+  cleanup:
+    needs: [checks, linux, publish]
+    if: ${{ always() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Remove temporary release artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[] | select(.name == "codex-m-linux-release") | .id' |
+          while read -r artifact_id; do
+            gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+          done

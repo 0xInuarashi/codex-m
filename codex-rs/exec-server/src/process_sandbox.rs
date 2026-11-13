@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use crate::process_telemetry::ProcessTelemetry;
 use codex_exec_server_protocol::JSONRPCErrorError;
+use codex_exec_server_protocol::ProcessStartErrorData;
 use codex_file_system::WindowsSandboxSelection;
+use codex_network_proxy::CHILD_ONLY_CA_ENV_KEYS;
 use codex_network_proxy::CUSTOM_CA_ENV_KEYS;
 use codex_network_proxy::CredentialMaskingFailureMode;
 use codex_network_proxy::ManagedNetworkSandboxContext;
@@ -122,9 +124,11 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
             ));
         }
         if !codex_sandboxing::windows_mxc_available() {
-            return Err(invalid_params(
-                "native MXC is unavailable on this executor".to_owned(),
-            ));
+            return Err(
+                ProcessStartErrorData::SandboxUnavailable.attach_to(invalid_params(
+                    "native MXC is unavailable on this executor".to_owned(),
+                )),
+            );
         }
     }
     let (env, managed_network, network_proxy_handle, network_proxy_restricting_sid) =
@@ -149,8 +153,11 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
             windows_sandbox: None,
         });
     };
-    let runtime_paths = runtime_paths
-        .ok_or_else(|| invalid_params("sandbox runtime paths are not configured".to_string()))?;
+    let runtime_paths = runtime_paths.ok_or_else(|| {
+        ProcessStartErrorData::SandboxUnavailable.attach_to(invalid_params(
+            "sandbox runtime paths are not configured".to_string(),
+        ))
+    })?;
     let windows_sandbox_proxy_settings_mode = sandbox_context
         .windows_sandbox_proxy_settings_mode
         .unwrap_or_default();
@@ -162,13 +169,16 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
         runtime_readable_paths.extend(runtime_paths.codex_linux_sandbox_exe.iter().cloned());
     }
     let managed_mitm_ca_trust_bundle_path = managed_network.as_ref().and_then(|_| {
-        CUSTOM_CA_ENV_KEYS.iter().find_map(|key| {
-            let path = env.get(*key)?;
-            if !is_managed_mitm_ca_trust_bundle_path(path) {
-                return None;
-            }
-            AbsolutePathBuf::from_absolute_path(path).ok()
-        })
+        CUSTOM_CA_ENV_KEYS
+            .into_iter()
+            .chain(CHILD_ONLY_CA_ENV_KEYS)
+            .find_map(|key| {
+                let path = env.get(key)?;
+                if !is_managed_mitm_ca_trust_bundle_path(path) {
+                    return None;
+                }
+                AbsolutePathBuf::from_absolute_path(path).ok()
+            })
     });
     runtime_readable_paths.extend(managed_mitm_ca_trust_bundle_path);
     let sandbox_manager = SandboxManager::new()
@@ -243,9 +253,9 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
         })
         .map_err(|err| match err {
             codex_sandboxing::SandboxTransformError::SandboxUnavailable => {
-                invalid_params(err.to_string())
+                ProcessStartErrorData::SandboxUnavailable.attach_to(invalid_params(err.to_string()))
             }
-            err => invalid_params(format!("failed to prepare process sandbox: {err}")),
+            err => sandbox_preparation_error(err),
         })?
         .into_command_request();
     request.sandbox_override = sandbox_context.sandbox_override;
@@ -267,7 +277,7 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
             windows_sandbox_level,
             &request.env,
         )
-        .map_err(|err| invalid_params(format!("failed to prepare process sandbox: {err}")))?;
+        .map_err(sandbox_preparation_error)?;
         Some(PreparedWindowsSandboxRequest {
             permission_profile: permissions,
             workspace_roots: native_workspace_roots,
@@ -366,20 +376,14 @@ async fn prepare_managed_network(
                 registration_id: registration.executor_registration_id.clone(),
             }),
     });
-    let mut builder = NetworkProxy::builder()
-        .state(Arc::new(state))
-        .managed_proxy_routing(routing);
-    if let Some(network_policy_decider) = network_policy_decider {
-        builder = builder.policy_decider_arc(network_policy_decider);
-    }
-    let proxy = builder
-        .build()
-        .await
-        .map_err(|err| internal_error(format!("failed to build executor network proxy: {err}")))?;
-    let handle = proxy
-        .run()
-        .await
-        .map_err(|err| internal_error(format!("failed to start executor network proxy: {err}")))?;
+    let (proxy, handle) = NetworkProxy::start_managed(
+        state,
+        routing,
+        network_policy_decider,
+        /*blocked_request_observer*/ None,
+    )
+    .await
+    .map_err(|err| internal_error(err.to_string()))?;
     #[cfg(target_os = "windows")]
     let network_proxy_restricting_sid = if routing == ManagedProxyRouting::SharedIngress {
         Some(
@@ -433,6 +437,12 @@ async fn prepare_managed_network(
         Some(handle),
         network_proxy_restricting_sid,
     ))
+}
+
+fn sandbox_preparation_error(err: impl std::fmt::Display) -> JSONRPCErrorError {
+    ProcessStartErrorData::SandboxPreparation.attach_to(invalid_params(format!(
+        "failed to prepare process sandbox: {err}"
+    )))
 }
 
 fn native_path(path: &PathUri, label: &str) -> Result<AbsolutePathBuf, JSONRPCErrorError> {

@@ -49,7 +49,6 @@ use crate::exec_policy::default_policy_path;
 use crate::image_preparation::ImagePreparationMode;
 use crate::image_preparation::ImageResizeNoticeMode;
 use crate::image_preparation::prepare_response_items as prepare_image_response_items;
-use crate::image_preparation::unified_image_budget_enabled;
 use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
 use crate::realtime_history::RealtimeEventOrder;
@@ -226,8 +225,6 @@ use uuid::Uuid;
 use crate::client::ModelClient;
 use crate::codex_thread::CodexThreadSettingsOverrides;
 use crate::codex_thread::ThreadConfigSnapshot;
-#[cfg(test)]
-use crate::compact::collect_user_messages;
 use crate::config::Config;
 use crate::config::ConstraintResult;
 use crate::config::PermissionProfileSnapshot;
@@ -690,7 +687,15 @@ impl Session {
         })
     }
 
-    async fn spawn_internal(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
+    // Construct the startup future outside the caller's poll frame.
+    #[inline(never)]
+    fn spawn_internal(
+        args: SessionSpawnArgs,
+    ) -> BoxFuture<'static, CodexResult<(Arc<Self>, SessionIo)>> {
+        Box::pin(Self::initialize(args))
+    }
+
+    async fn initialize(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
         args.config
             .config_layer_stack
             .ensure_config_server_applied()?;
@@ -1999,38 +2004,22 @@ impl Session {
                 .and_then(|context| context.direct_only_tool_namespaces.clone())
                 .map(|namespaces| (turn.turn_id.clone(), namespaces))
         });
-        // Keep the recorded rollout unchanged. Prepare its reconstructed history before
-        // installing it, so legacy media is processed once for this resume or fork and
-        // will be processed again if the rollout is reconstructed in a future session.
-        // Replay disables image-resize notices, so media preparation remains one-to-one. Keep
-        // the prior batch behavior and carry history-only metadata in a positional sidecar.
-        let (mut prepared_history, metadata): (Vec<_>, Vec<_>) = history
-            .into_iter()
-            .map(|envelope| (envelope.item, envelope.metadata))
-            .unzip();
-        // Replay must not upload or migrate recorded history. The inline store returns prepared
-        // inline bytes, while existing file references bypass preparation and remain unchanged.
+        // Prepare inline images in memory on resume or fork. Keep file references as they are.
+        // The inline store avoids uploads, and replay leaves the saved history untouched.
+        // Skip resize notices here so replay doesn't add messages to the conversation.
         // Bound replay future size now that image preparation can await storage.
         let _ = Box::pin(prepare_image_response_items(
             &self.thread_id.to_string(),
             turn_context.config.ephemeral,
-            &mut prepared_history,
-            ImagePreparationMode::DetailBased,
+            &mut history,
+            ImagePreparationMode::for_replay(&turn_context.config.features),
             ImageResizeNoticeMode::Disabled,
             &InlineAttachmentStore,
         ))
         .await;
-        prepare_audio_response_items(&mut prepared_history);
-        assert_eq!(
-            prepared_history.len(),
-            metadata.len(),
-            "replay media preparation must remain one-to-one when resize notices are disabled"
-        );
-        history = prepared_history
-            .into_iter()
-            .zip(metadata)
-            .map(|(item, metadata)| ResponseItemEnvelope { item, metadata })
-            .collect();
+        for envelope in &mut history {
+            prepare_audio_response_items(std::slice::from_mut(&mut envelope.item));
+        }
         file_audio::resolve(self, file_audio::file_ids(&history).cloned().collect()).await;
         // Ordinary replay needs no reviewer refresh. Only an opaque
         // checkpoint can make reconstruction depend on reviewer compatibility.
@@ -3946,21 +3935,16 @@ impl Session {
         item.set_create_time_if_missing(Self::response_item_create_time());
     }
 
-    /// Prepares media using the originating model and preserves existing item identity.
+    /// Prepares media for the model that received these items and keeps their existing IDs.
+    /// Each saved original stays with the item that contains the prepared image.
     pub(crate) async fn prepare_conversation_items_for_history(
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
-        items: &[ResponseItem],
-    ) -> (Vec<ResponseItem>, Vec<ImagePreparationMetadata>) {
-        let mut items = items.to_vec();
-        let image_preparation_mode =
-            if unified_image_budget_enabled(&turn_context.config.features, model_info) {
-                ImagePreparationMode::UnifiedBudget
-            } else {
-                ImagePreparationMode::DetailBased
-            };
-        let image_resize_notice_mode = if turn_context
+        mut items: Vec<ResponseItemEnvelope>,
+    ) -> (Vec<ResponseItemEnvelope>, Vec<ImagePreparationMetadata>) {
+        let image_mode = ImagePreparationMode::for_model(&turn_context.config.features, model_info);
+        let resize_notices = if turn_context
             .config
             .features
             .enabled(Feature::ImageResizeNotice)
@@ -3974,14 +3958,15 @@ impl Session {
             &self.thread_id.to_string(),
             turn_context.config.ephemeral,
             &mut items,
-            image_preparation_mode,
-            image_resize_notice_mode,
+            image_mode,
+            resize_notices,
             self.services.image_store.as_ref(),
         ))
         .await;
-        prepare_audio_response_items(&mut items);
-        // Most response items get their passthrough turn ID at the durable history boundary.
-        for item in &mut items {
+        for envelope in &mut items {
+            let item = &mut envelope.item;
+            prepare_audio_response_items(std::slice::from_mut(item));
+            // Most response items get their passthrough turn ID at the durable history boundary.
             Self::stamp_response_item_for_history(item, &turn_context.sub_id);
             self.assign_missing_response_item_id(item);
         }
@@ -4039,22 +4024,20 @@ impl Session {
 
     /// Appends to history, persists the prepared items, then notifies raw-item observers.
     /// Execution callers supply their captured model; standalone callers need no tool runtime.
-    #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn record_conversation_items(
         &self,
         turn_context: &TurnContext,
         model_info: &ModelInfo,
         items: &[ResponseItem],
     ) {
-        let (items, image_preparations) = self
-            .prepare_conversation_items_for_history(turn_context, model_info, items)
-            .await;
-        let items = items.into_iter().map(ResponseItemEnvelope::new).collect();
-        self.record_prepared_conversation_items(
+        self.record_annotated_conversation_items(
             turn_context,
             model_info,
-            items,
-            image_preparations,
+            items
+                .iter()
+                .cloned()
+                .map(ResponseItemEnvelope::new)
+                .collect(),
         )
         .await;
     }
@@ -4709,14 +4692,15 @@ impl Session {
     ) {
         let communication = communication.into();
         let response_item = Self::inter_agent_history_item(&communication, &turn_context.config);
-        let (items, _) = self
+        let (mut prepared, _) = self
             .prepare_conversation_items_for_history(
                 turn_context,
                 model_info,
-                std::slice::from_ref(&response_item),
+                vec![ResponseItemEnvelope::new(response_item)],
             )
             .await;
-        let mut response_item = ResponseItemEnvelope::new(items[0].clone());
+        let mut response_item = prepared.remove(0);
+        let items = [response_item.item.clone()];
         // A send confirmed after the pending snapshot must not reach the rollout
         // before this boundary; older readers assign deliveries by physical order.
         let boundary = self
@@ -5507,24 +5491,16 @@ impl Session {
         let turn_context = step_context.turn.as_ref();
         let history = self.clone_history().await;
         let input_goal_ids = crate::context::UserGoalUpdate::message_ids(history.raw_items());
-        let retained_client_items =
-            crate::compact_remote_v2::truncate_retained_messages_for_remote_compaction(
-                history
-                    .annotated_items()
-                    .iter()
-                    .filter(|item| {
-                        (self.enabled(Feature::RetainClientToolOutputs)
-                            && crate::compact_retained_tool_outputs::is_retained_tool_output(item))
-                            || (self.enabled(Feature::RetainClientDeveloperMessages)
-                                && crate::compact_remote_v2::is_client_authored_developer_message(
-                                    item,
-                                ))
-                    })
-                    .cloned()
-                    .collect(),
-                crate::compact_remote_v2::RETAINED_MESSAGE_TOKEN_BUDGET,
-                &history.file_audio_durations,
-            );
+        let retained_client_items = crate::compact_remote_v2::retained_client_items(
+            history.annotated_items(),
+            &history.file_audio_durations,
+            |item| {
+                crate::compact_remote_v2::should_retain_client_item(
+                    item,
+                    &turn_context.config.features,
+                )
+            },
+        );
         // Resolve the roster before allocating a new context window.
         let rendered = world_state.render_full_with_host_roster().await;
         let (window_number, window_ids) = self.state.lock().await.start_new_context_window();
@@ -5534,7 +5510,7 @@ impl Session {
             crate::context_manager::updates::merge_world_state_updates(context_updates)
                 .into_iter()
                 .map(ResponseItemEnvelope::new)
-                .chain(retained_client_items)
+                .chain(retained_client_items.into_values())
                 .collect();
         let turn_context_item = step_context.to_turn_context_item();
         self.replace_compacted_history(
@@ -5991,7 +5967,7 @@ impl Session {
             )]);
         }
         let (prepared_items, image_preparations) = self
-            .prepare_annotated_conversation_items_for_history(
+            .prepare_conversation_items_for_history(
                 turn_context,
                 model_info,
                 vec![ResponseItemEnvelope {

@@ -1316,6 +1316,9 @@
             "runtime_metrics": {
               "type": "boolean"
             },
+            "safe_image_decoder": {
+              "type": "boolean"
+            },
             "search_tool": {
               "type": "boolean"
             },
@@ -2291,6 +2294,17 @@
           ],
           "description": "Deprecated and ignored; asynchronous classification always uses conversations."
         },
+        "async_elastic_budgeting": {
+          "description": "Enable elastic allocation for asynchronous Guardian requests. Defaults to false.",
+          "type": "boolean"
+        },
+        "async_elastic_sections": {
+          "additionalProperties": {
+            "$ref": "#/definitions/GuardianElasticSectionConfigToml"
+          },
+          "description": "Section limits validated when asynchronous elastic budgeting is enabled.",
+          "type": "object"
+        },
         "classifier_instructions": {
           "type": "string"
         },
@@ -2748,6 +2762,11 @@
     "MarketplaceConfig": {
       "additionalProperties": false,
       "properties": {
+        "auto_update": {
+          "default": false,
+          "description": "Check for updates to installed Git plugins from this marketplace when plugins are listed.",
+          "type": "boolean"
+        },
         "last_revision": {
           "default": null,
           "description": "Git revision Codex last successfully activated for this marketplace.",
@@ -8462,6 +8481,9 @@
           "$ref": "#/definitions/FeatureToml_for_RuntimeAgentInstancesConfigToml"
         },
         "runtime_metrics": {
+          "type": "boolean"
+        },
+        "safe_image_decoder": {
           "type": "boolean"
         },
         "search_tool": {

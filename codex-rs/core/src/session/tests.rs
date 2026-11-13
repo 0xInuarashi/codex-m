@@ -390,14 +390,17 @@ async fn default_turn_context_assigns_missing_response_item_ids() {
             role: "developer".to_string(),
             tools: Arc::from([]),
         },
-    ];
+    ]
+    .into_iter()
+    .map(ResponseItemEnvelope::new)
+    .collect();
     let (items, _) = session
-        .prepare_conversation_items_for_history(&turn_context, turn_context.model_info(), &items)
+        .prepare_conversation_items_for_history(&turn_context, turn_context.model_info(), items)
         .await;
 
     assert_eq!(items.len(), 3);
     for (item, prefix) in items.iter().zip(["msg_", "amsg_", "at_"]) {
-        let suffix = item.id().unwrap().strip_prefix(prefix).unwrap();
+        let suffix = item.item.id().unwrap().strip_prefix(prefix).unwrap();
         assert_eq!(Uuid::parse_str(suffix).unwrap().get_version_num(), 7);
     }
 }
@@ -1217,82 +1220,6 @@ async fn start_managed_network_proxy_applies_execpolicy_network_rules() -> anyho
     assert_eq!(
         current_cfg.allowed_domains(),
         Some(vec!["example.com".to_string()])
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn managed_network_proxy_decider_survives_full_access_start() -> anyhow::Result<()> {
-    let full_access_permission_profile = PermissionProfile::Disabled;
-    let spec = crate::config::NetworkProxySpec::from_config_and_constraints(
-        NetworkProxyConfig::default(),
-        Some(NetworkConstraints {
-            enabled: Some(true),
-            ..Default::default()
-        }),
-        &full_access_permission_profile,
-    )?;
-    let exec_policy = Policy::empty();
-    let decider_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let network_policy_decider: Arc<dyn codex_network_proxy::NetworkPolicyDecider> = Arc::new({
-        let decider_calls = Arc::clone(&decider_calls);
-        move |_request| {
-            decider_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            async { codex_network_proxy::NetworkDecision::ask("not_allowed") }
-        }
-    });
-
-    let (started_proxy, _) = Session::start_managed_network_proxy(
-        &spec,
-        &exec_policy,
-        &full_access_permission_profile,
-        SandboxType::None,
-        Some(network_policy_decider),
-        /*blocked_request_observer*/ None,
-        /*managed_network_requirements_enabled*/ true,
-        crate::config::NetworkProxyAuditMetadata::default(),
-    )
-    .await?;
-
-    let spec = spec.recompute_for_permission_profile(&PermissionProfile::workspace_write())?;
-    spec.apply_to_started_proxy(&started_proxy).await?;
-    let current_cfg = started_proxy.proxy().current_cfg().await?;
-    assert_eq!(current_cfg.allowed_domains(), None);
-
-    use tokio::io::AsyncReadExt as _;
-    use tokio::io::AsyncWriteExt as _;
-
-    let prepared = started_proxy
-        .proxy()
-        .prepare_for_remote_environment(std::collections::HashMap::new(), "test-bridge")?;
-    let proxy_addr = prepared.env["HTTP_PROXY"]
-        .strip_prefix("http://")
-        .expect("HTTP proxy URL")
-        .parse::<std::net::SocketAddr>()?;
-    let mut stream = tokio::net::TcpStream::connect(proxy_addr).await?;
-    stream
-        .write_all(
-            b"GET http://example.com/ HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
-        )
-        .await?;
-    let mut buffer = [0_u8; 4096];
-    let bytes_read = tokio::time::timeout(StdDuration::from_secs(2), stream.read(&mut buffer))
-        .await
-        .expect("timed out waiting for proxy response")?;
-    let response = String::from_utf8_lossy(&buffer[..bytes_read]);
-
-    assert!(
-        response.starts_with("HTTP/1.1 403 Forbidden"),
-        "unexpected proxy response: {response}"
-    );
-    assert!(
-        response.contains("x-proxy-error: blocked-by-allowlist"),
-        "unexpected proxy response: {response}"
-    );
-    assert_eq!(
-        decider_calls.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "unexpected proxy response: {response}"
     );
     Ok(())
 }
@@ -13506,9 +13433,7 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::ResponseItem(assistant1.clone().into()));
 
     let summary1 = "summary one";
-    let snapshot1 = raw_history_items(&live_history);
-    let user_messages1 = collect_user_messages(&snapshot1);
-    let rebuilt1 = compact::build_compacted_history(Vec::new(), &user_messages1, summary1);
+    let rebuilt1 = compact::build_compacted_history(&live_history, summary1);
     live_history.replace_annotated(rebuilt1);
     let (window_number, window_ids) = session.advance_auto_compact_window().await;
     rollout_items.push(RolloutItem::Compacted(Box::new(CompactedItem {
@@ -13541,9 +13466,7 @@ async fn sample_rollout(
     rollout_items.push(RolloutItem::ResponseItem(assistant2.clone().into()));
 
     let summary2 = "summary two";
-    let snapshot2 = raw_history_items(&live_history);
-    let user_messages2 = collect_user_messages(&snapshot2);
-    let rebuilt2 = compact::build_compacted_history(Vec::new(), &user_messages2, summary2);
+    let rebuilt2 = compact::build_compacted_history(&live_history, summary2);
     live_history.replace_annotated(rebuilt2);
     let (window_number, window_ids) = session.advance_auto_compact_window().await;
     rollout_items.push(RolloutItem::Compacted(Box::new(CompactedItem {

@@ -4,6 +4,9 @@ bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "platforms", version = "1.0.0")
 
+bazel_lib_toolchains = use_extension("@bazel_lib//lib:extensions.bzl", "toolchains")
+use_repo(bazel_lib_toolchains, "coreutils_toolchains")
+
 # Expose rules_rs's existing dependency for the openssl-sys replacement's SBOM.
 bazel_dep(name = "package_metadata", version = "0.0.7")
 
@@ -322,7 +325,7 @@ toolchains.toolchain(
     edition = "2024",
     extra_exec_rustc_flags = MSVC_RUSTC_FLAGS,
     extra_rustc_flags = MSVC_RUSTC_FLAGS,
-    version = "1.95.0",
+    version = "1.99.1",
 )
 use_repo(toolchains, "default_rust_toolchains")
 
@@ -877,7 +880,11 @@ engine_repository(
 
 # All V8 inputs are owned here, including the pinned Python generator inputs.
 pip.parse(
-    extra_pip_args = ["--require-hashes"],
+    envsubst = ["PIP_INDEX_URL"],
+    extra_pip_args = [
+        "--require-hashes",
+        "--index-url=${PIP_INDEX_URL:-https://pypi.org/simple}",
+    ],
     hub_name = "v8_python_deps",
     python_version = "3.11",
     requirements_lock = "@v8//:bazel/requirements.txt",

@@ -731,7 +731,7 @@ async fn request_mcp_server_elicitation_waits_for_user_response(
             session
                 .request_mcp_server_elicitation(
                     &turn_context,
-                    "codex_apps".to_string(),
+                    codex_mcp::McpServerKey::unscoped("codex_apps"),
                     RequestId::String("request-1".into()),
                     request,
                 )
@@ -750,6 +750,7 @@ async fn request_mcp_server_elicitation_waits_for_user_response(
         codex_protocol::approvals::ElicitationRequestEvent {
             turn_id: Some(turn_context.sub_id.clone()),
             server_name: "codex_apps".to_string(),
+            environment_id: None,
             id: codex_protocol::mcp::RequestId::String("request-1".to_string()),
             request,
         }
@@ -9016,7 +9017,10 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() -> anyhow::Re
     let bundle = std::fs::read_dir(traces.path())?.next().unwrap()?.path();
     let rollout = replay_bundle(bundle)?;
     assert_eq!(rollout.status, RolloutStatus::Aborted);
-    assert!(rollout.recording_complete);
+    assert_eq!(
+        rollout.recording_status,
+        codex_rollout_trace::RecordingStatus::Complete
+    );
 
     assert_eq!(1, calls.load(std::sync::atomic::Ordering::SeqCst));
     assert_eq!(

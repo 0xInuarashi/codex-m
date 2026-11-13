@@ -138,7 +138,7 @@ pub(super) async fn reconnect(
         }
     }
     tracing::warn!(stage, "automatic reconnect timed out");
-    color_eyre::eyre::bail!("Automatic reconnect timed out while {stage}.")
+    color_eyre::eyre::bail!("Automatic reconnect timed out while {stage}.");
 }
 
 impl App {
@@ -485,6 +485,9 @@ impl App {
             store.pending_interactive_replay = Default::default();
             store.pending_interrupt_turn_id = None;
             store.active = false;
+            if let Some(session) = &mut store.session {
+                session.read_only_history = true;
+            }
             store
                 .buffer
                 .retain(|event| matches!(event, ThreadBufferedEvent::Notification(_)));

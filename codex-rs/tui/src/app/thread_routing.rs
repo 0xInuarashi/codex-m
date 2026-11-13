@@ -397,6 +397,7 @@ impl App {
                 if let Some(params) = AppLinkViewParams::from_url_app_server_request(
                     thread_id,
                     &params.server_name,
+                    params.environment_id.as_deref(),
                     request_id.clone(),
                     &params.request,
                 ) {
@@ -419,6 +420,7 @@ impl App {
                                 thread_id,
                                 thread_label,
                                 server_name: params.server_name.clone(),
+                                environment_id: params.environment_id.clone(),
                                 request_id: request_id.clone(),
                                 message: message.clone(),
                             }),
@@ -430,6 +432,7 @@ impl App {
                             request: crate::bottom_pane::user_verification::UserVerificationRequest {
                                 thread_label,
                                 server_name: params.server_name.clone(),
+                                environment_id: params.environment_id.clone(),
                                 request_id: request_id.clone(),
                                 title: title.clone(),
                                 description: description.clone(),
@@ -916,10 +919,7 @@ impl App {
                 let tx = self.app_event_tx.clone();
                 tokio::spawn(async move {
                     let create = async {
-                        let voices = Self::realtime_voices(&server).await?;
-                        let voice = Self::effective_realtime_voice(&server, &cwd, &voices)
-                            .await?
-                            .unwrap_or(voices.default_v1);
+                        let voice = Self::effective_realtime_voice(&server, &cwd).await?;
                         let thread = server
                             .thread_read(thread_id, /*include_turns*/ false)
                             .await?;
@@ -970,6 +970,15 @@ impl App {
                 Ok(true)
             }
             AppCommand::RunUserShellCommand { command } => {
+                if app_server.thread_params_mode()
+                    == crate::app_server_session::ThreadParamsMode::Cloud
+                {
+                    self.chat_widget.reject_user_shell_command(
+                        "Shell commands starting with ! are unavailable in Cloud conversations."
+                            .into(),
+                    );
+                    return Ok(true);
+                }
                 app_server
                     .thread_shell_command(thread_id, command.to_string())
                     .await?;
@@ -1421,6 +1430,7 @@ impl App {
         notification: &ThreadStartedNotification,
     ) -> Option<ThreadSessionState> {
         let mut session = self.primary_session_configured.clone()?;
+        session.read_only_history = false;
         session.thread_id = thread_id;
         // The primary session supplies defaults. The new thread supplies its own fork parent.
         session.set_fork_parent(notification.thread.forked_from_id.as_deref());
@@ -1613,7 +1623,8 @@ impl App {
             ThreadAttachPresentation::Fresh
             | ThreadAttachPresentation::FreshAfterClear
             | ThreadAttachPresentation::FreshWithDraft
-            | ThreadAttachPresentation::SessionLineage => {
+            | ThreadAttachPresentation::SessionLineage
+            | ThreadAttachPresentation::SessionLineageAfterClear => {
                 self.chat_widget.handle_thread_session(session);
             }
         }
@@ -2049,6 +2060,7 @@ impl App {
                 AppLinkViewParams::from_url_app_server_request(
                     thread_id,
                     &params.server_name,
+                    params.environment_id.as_deref(),
                     request_id.clone(),
                     request,
                 )

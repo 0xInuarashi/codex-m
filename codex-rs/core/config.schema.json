@@ -710,6 +710,18 @@
       },
       "type": "object"
     },
+    "CodeModeToml": {
+      "additionalProperties": false,
+      "properties": {
+        "heartbeat_interval_s": {
+          "description": "Idle seconds between gRPC stream heartbeats. Zero (the default) disables them.",
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "ComputerUseConfigToml": {
       "additionalProperties": false,
       "properties": {
@@ -1037,6 +1049,9 @@
             "fast_mode": {
               "type": "boolean"
             },
+            "file_backed_tool_audio": {
+              "type": "boolean"
+            },
             "gateway_setup_wizard": {
               "type": "boolean"
             },
@@ -1176,6 +1191,9 @@
               "type": "boolean"
             },
             "mcp_oauth_refresh_coordination": {
+              "type": "boolean"
+            },
+            "mcp_shared_repl_cwd": {
               "type": "boolean"
             },
             "mcp_tool_list_changed": {
@@ -5112,6 +5130,10 @@
           "maxLength": 2000,
           "type": "string"
         },
+        "context_window_as_tool_output": {
+          "description": "Render the context window and its hints as an agent.thread_hint tool output.",
+          "type": "boolean"
+        },
         "enabled": {
           "type": "boolean"
         },
@@ -5518,6 +5540,7 @@
               "half_page_up": null,
               "jump_bottom": null,
               "jump_top": null,
+              "mark_markdown": null,
               "page_down": null,
               "page_up": null,
               "scroll_down": null,
@@ -6734,6 +6757,7 @@
             "half_page_up": null,
             "jump_bottom": null,
             "jump_top": null,
+            "mark_markdown": null,
             "page_down": null,
             "page_up": null,
             "scroll_down": null,
@@ -6994,6 +7018,14 @@
             }
           ],
           "description": "Jump to the beginning."
+        },
+        "mark_markdown": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/KeybindingsSpec"
+            }
+          ],
+          "description": "Mark Markdown structure under the caret in transcript selection mode."
         },
         "page_down": {
           "allOf": [
@@ -7899,6 +7931,14 @@
       ],
       "description": "Cloud-owned feature settings."
     },
+    "code_mode": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/CodeModeToml"
+        }
+      ],
+      "description": "Code Mode session settings."
+    },
     "compact_prompt": {
       "description": "Compact prompt used for history compaction.",
       "type": "string"
@@ -8204,6 +8244,9 @@
         "fast_mode": {
           "type": "boolean"
         },
+        "file_backed_tool_audio": {
+          "type": "boolean"
+        },
         "gateway_setup_wizard": {
           "type": "boolean"
         },
@@ -8343,6 +8386,9 @@
           "type": "boolean"
         },
         "mcp_oauth_refresh_coordination": {
+          "type": "boolean"
+        },
+        "mcp_shared_repl_cwd": {
           "type": "boolean"
         },
         "mcp_tool_list_changed": {

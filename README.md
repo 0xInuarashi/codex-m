@@ -104,6 +104,32 @@ codex-m resume
 
 Existing sessions and app-server daemons continue using the binary they started with. Launch or resume through `codex-m` to use the fork.
 
+### Share terminal sessions with mobile
+
+Terminal and mobile clients must use the same app server to share a running conversation. A plain `codex-m` launch can run an independent embedded server because the fork's routing defaults are loaded as configuration overrides. Two independent servers cannot own the same conversation: the second reports an active writer conflict.
+
+With a codex-m app server already running on the default local socket, connect explicitly:
+
+```bash
+codex-m --remote unix:// resume SESSION_ID
+```
+
+Exit any independent terminal session holding that conversation before resuming it through the shared server. Closing a terminal attached to the shared server leaves the server running.
+
+For Bash, the optional [shell helper](scripts/codex-m-shell.bash) makes `codex-m`, `codex-m resume`, `codex-m fork`, and `codex-m agents` use `--remote unix://` automatically. **It also adds `--yolo`, which disables sandboxing and approval prompts.** To opt in, run this from the repository root:
+
+```bash
+mkdir -p "$HOME/.config/codex-m"
+install -m 644 scripts/codex-m-shell.bash "$HOME/.config/codex-m/shell.bash"
+source "$HOME/.config/codex-m/shell.bash"
+```
+
+Add `source "$HOME/.config/codex-m/shell.bash"` to `~/.bashrc` to load it in future terminals. Maintenance and non-interactive commands, including `update`, `app-server`, and `exec`, retain their normal connection behavior. Explicit `--remote` addresses are respected; use `codex-m --no-daemon` for an independent local session.
+
+The helper also defines `codex` as `codex-m --yolo`, so ordinary `codex` launches use the fork and shared service. Use `codex-o` to run the original `codex` executable on your `PATH` with `--yolo`; it bypasses the `codex` alias.
+
+The helper connects to an existing service; it does not install or start one. The service must run the fork binary, for example `command codex-m app-server --remote-control --listen unix://`. The upstream daemon manager may select its separately installed standard Codex package even when invoked through `codex-m remote-control start`.
+
 ## Configure routing
 
 Edit `~/.config/codex-m/config.toml`. A fresh installation writes these defaults:

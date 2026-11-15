@@ -116,19 +116,19 @@ codex-m --remote unix:// resume SESSION_ID
 
 Exit any independent terminal session holding that conversation before resuming it through the shared server. Closing a terminal attached to the shared server leaves the server running.
 
-For Bash, the optional [shell helper](scripts/codex-m-shell.bash) makes `codex-m`, `codex-m resume`, `codex-m fork`, and `codex-m agents` use `--remote unix://` automatically. **It also adds `--yolo`, which disables sandboxing and approval prompts.** To opt in, run this from the repository root:
+For prebuilt installations, the optional [command installer](scripts/install-codex-m-commands.py) creates real `codex`, `codex-m`, and `codex-o` executables in `~/.local/bin`. Interactive `codex` and `codex-m` launches, including `resume`, `fork`, and `agents`, use `--remote unix://` automatically. `codex-o` executes the original standalone package independently with `--no-daemon`. **All three add `--yolo`, which disables sandboxing and approval prompts.** With both prebuilt packages installed, opt in from the repository root:
 
 ```bash
-mkdir -p "$HOME/.config/codex-m"
-install -m 644 scripts/codex-m-shell.bash "$HOME/.config/codex-m/shell.bash"
-source "$HOME/.config/codex-m/shell.bash"
+python3 scripts/install-codex-m-commands.py
+source ~/.bashrc
+which codex codex-m codex-o
 ```
 
-Add `source "$HOME/.config/codex-m/shell.bash"` to `~/.bashrc` to load it in future terminals. Maintenance and non-interactive commands, including `update`, `app-server`, and `exec`, retain their normal connection behavior. Explicit `--remote` addresses are respected; use `codex-m --no-daemon` for an independent local session.
+The installer preserves the previous command entries in `~/.local/state/codex-m-commands`, leaves package binaries intact, and adds a Bash startup hook that clears old aliases, functions, and cached command paths. The commands work without alias expansion, including in scripts and other shells with `~/.local/bin` on `PATH`. Maintenance and non-interactive commands retain their normal connection behavior. Explicit `--remote` addresses are respected; use `codex-m --no-daemon` for an independent local session.
 
-The helper also defines `codex` as `codex-m --yolo`, so ordinary `codex` launches use the fork and shared service. Use `codex-o` to run the original `codex` executable on your `PATH` with `--yolo`; it bypasses the `codex` alias.
+Rerunning the command installer is safe. Rerun it if a package installer or updater replaces the visible command links. Already-running independent sessions retain their conversation locks until they exit; installing launchers does not transfer or terminate them.
 
-The helper connects to an existing service; it does not install or start one. The service must run the fork binary, for example `command codex-m app-server --remote-control --listen unix://`. The upstream daemon manager may select its separately installed standard Codex package even when invoked through `codex-m remote-control start`.
+The launchers connect to an existing service; they do not install or start one. The service must run the fork binary, for example `codex-m app-server --remote-control --listen unix://`. The upstream daemon manager may select its separately installed standard Codex package even when invoked through `codex-m remote-control start`.
 
 ## Configure routing
 

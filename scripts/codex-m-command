@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Installed as codex, codex-m, and codex-o. Execute package binaries directly:
+# going back through PATH could recurse or select the wrong distribution.
+set -e
+codex_m_home="${CODEX_HOME:-$HOME/.codex}"
+case "${0##*/}" in
+    codex-o) codex_m_package=standalone; codex_m_shared=0 ;;
+    codex|codex-m) codex_m_package=codex-m; codex_m_shared=1 ;;
+    *) printf 'Run this launcher as codex, codex-m, or codex-o.\n' >&2; exit 2 ;;
+esac
+codex_m_binary="$codex_m_home/packages/$codex_m_package/current/bin/codex"
+if [[ ! -x "$codex_m_binary" ]]; then
+    printf 'Codex package binary is missing: %s\n' "$codex_m_binary" >&2
+    exit 127
+fi
+
+codex_m_run() {
+    local codex_m_use_remote="$codex_m_shared" codex_m_seen_command=0 codex_m_skip_value=0
+    local codex_m_use_local=$((1 - codex_m_shared))
+    local codex_m_arg
+    local -a codex_m_defaults=(--yolo)
+
+    for codex_m_arg in "$@"; do
+        if (( codex_m_skip_value )); then
+            codex_m_skip_value=0
+            continue
+        fi
+        case "$codex_m_arg" in
+            --) break ;;
+            --remote)
+                codex_m_use_remote=0
+                codex_m_use_local=0
+                codex_m_skip_value=1
+                ;;
+            --remote=*|--no-daemon)
+                codex_m_use_remote=0
+                codex_m_use_local=0
+                ;;
+            --yolo|--dangerously-bypass-approvals-and-sandbox)
+                codex_m_defaults=()
+                ;;
+            -c|--config|-m|--model|-i|--image|-p|--profile|-s|--sandbox|\
+            -C|--cd|-a|--ask-for-approval|--enable|--disable|--local-provider|\
+            --remote-auth-token-env|--add-dir)
+                codex_m_skip_value=1
+                ;;
+            -*) ;;
+            *)
+                if (( ! codex_m_seen_command )); then
+                    case "$codex_m_arg" in
+                        exec|e|review|login|logout|mcp|plugin|app-server|\
+                        remote-control|completion|update|doctor|sandbox|debug|\
+                        apply|a|queue|archive|delete|migrate-rollouts|migrate-nfs-db|\
+                        unarchive|cloud|cloud-tasks|exec-server|features|help|app|\
+                        tcp-tunnel|git-credential|execpolicy|responses-api-proxy|stdio-to-uds)
+                            codex_m_use_remote=0
+                            codex_m_use_local=0
+                            ;;
+                    esac
+                    codex_m_seen_command=1
+                fi
+                ;;
+        esac
+    done
+
+    if (( codex_m_use_remote )); then
+        codex_m_defaults+=(--remote unix://)
+    elif (( codex_m_use_local )); then
+        codex_m_defaults+=(--no-daemon)
+    fi
+    exec "$codex_m_binary" "${codex_m_defaults[@]}" "$@"
+}
+codex_m_run "$@"

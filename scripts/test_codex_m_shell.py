@@ -1,13 +1,14 @@
-"""Exercise the sourced Bash helper without starting real Codex sessions."""
+"""Exercise installed commands without starting real Codex sessions."""
 import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
-HELPER = Path(__file__).with_name('codex-m-shell.bash')
+INSTALLER = Path(__file__).with_name('install-codex-m-commands.py')
 
 
 @unittest.skipUnless(shutil.which('bash'), 'Bash is required')
@@ -15,22 +16,41 @@ class ShellDefaultsTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix='codex-m-shell-')
         self.addCleanup(temporary.cleanup)
-        self.bin = Path(temporary.name)
-        stub = self.bin / 'codex-m'
+        self.home = Path(temporary.name)
+        self.bin = self.home / '.local/bin'
+        self.bin.mkdir(parents=True)
+        self.env = {**os.environ, 'HOME': str(self.home),
+                    'CODEX_HOME': str(self.home / '.codex'),
+                    'PATH': f'{self.bin}:/usr/bin:/bin'}
+        stub = self.home / '.codex/packages/codex-m/current/bin/codex'
+        stub.parent.mkdir(parents=True)
         stub.write_text('#!/bin/bash\nprintf "%s\\0" "$@"\nexit "${CODEX_M_TEST_EXIT:-0}"\n')
         stub.chmod(0o755)
-        original = self.bin / 'codex'
+        original = self.home / '.codex/packages/standalone/current/bin/codex'
+        original.parent.mkdir(parents=True)
         original.write_text('#!/bin/bash\nprintf "%s\\0" original "$@"\n')
         original.chmod(0o755)
+        (self.bin / 'codex-m').symlink_to(stub)
+        (self.bin / 'codex').symlink_to(original)
+        self.install()
+
+    def install(self):
+        subprocess.run([sys.executable, str(INSTALLER)], env=self.env,
+                       capture_output=True, text=True, check=True)
 
     def run_helper(self, arguments, *, exit_code=0, reload=False, command='codex-m'):
-        source = 'shopt -s expand_aliases\n. "$1"\nshift\n' + command + ' "$@"'
+        invocation = [str(self.bin / command), *arguments]
         if reload:
-            source = 'shopt -s expand_aliases\nalias codex-m="codex-m --yolo"\n. "$1"\n' + source
+            source = ('shopt -s expand_aliases\n'
+                      'alias codex-m="codex-m --yolo"\n'
+                      'alias codex="codex-m --yolo"\n'
+                      'alias codex-o="command codex --yolo"\n'
+                      'source "$HOME/.bashrc"\nsource "$HOME/.bashrc"\n'
+                      + command + ' "$@"')
+            invocation = ['bash', '--noprofile', '--norc', '-c', source, 'shell-test', *arguments]
         result = subprocess.run(
-            ['bash', '--noprofile', '--norc', '-c', source, 'shell-test', str(HELPER), *arguments],
-            env={**os.environ, 'PATH': f'{self.bin}:/usr/bin:/bin',
-                 'CODEX_M_TEST_EXIT': str(exit_code)},
+            invocation,
+            env={**self.env, 'CODEX_M_TEST_EXIT': str(exit_code)},
             capture_output=True,
         )
         self.assertEqual(result.returncode, exit_code, result.stderr.decode())
@@ -84,21 +104,47 @@ class ShellDefaultsTests(unittest.TestCase):
             args = [flag, 'resume', 'thread-id']
             self.assertEqual(self.run_helper(args), ['--remote', 'unix://', *args])
 
-    def test_previous_alias_can_be_replaced_and_helper_can_be_sourced_twice(self):
+    def test_previous_aliases_can_be_cleared_and_bashrc_sourced_twice(self):
         self.assertEqual(self.run_helper(['resume'], reload=True),
                          ['--yolo', '--remote', 'unix://', 'resume'])
+        self.assertEqual(self.run_helper(['resume'], reload=True, command='codex-o'),
+                         ['original', '--yolo', '--no-daemon', 'resume'])
 
     def test_exit_status_is_preserved(self):
         self.assertEqual(self.run_helper(['--version'], exit_code=17),
                          ['--yolo', '--remote', 'unix://', '--version'])
 
-    def test_codex_alias_uses_the_fork_and_shared_service(self):
+    def test_codex_command_uses_the_fork_and_shared_service(self):
         self.assertEqual(self.run_helper(['resume', 'thread-id'], command='codex'),
-                         ['--remote', 'unix://', '--yolo', 'resume', 'thread-id'])
+                         ['--yolo', '--remote', 'unix://', 'resume', 'thread-id'])
 
-    def test_codex_o_bypasses_codex_alias_and_uses_original_binary(self):
+    def test_codex_o_uses_original_binary_directly(self):
         self.assertEqual(self.run_helper(['resume', 'thread-id'], command='codex-o'),
-                         ['original', '--yolo', 'resume', 'thread-id'])
+                         ['original', '--yolo', '--no-daemon', 'resume', 'thread-id'])
+
+    def test_original_connection_override_and_maintenance_commands(self):
+        for args in [['--remote', 'unix://', 'resume', 'thread-id'],
+                     ['--no-daemon', 'resume', 'thread-id'], ['app-server', 'daemon', 'version']]:
+            with self.subTest(args=args):
+                self.assertEqual(self.run_helper(args, command='codex-o'),
+                                 ['original', '--yolo', *args])
+
+    def test_commands_are_discoverable_without_shell_aliases(self):
+        for name in ['codex', 'codex-m', 'codex-o']:
+            result = subprocess.run(['sh', '-c', 'command -v "$1"', 'test', name],
+                                    env=self.env, capture_output=True, text=True, check=True)
+            self.assertEqual(result.stdout.strip(), str(self.bin / name))
+
+    def test_reinstall_preserves_package_binaries_and_previous_entries(self):
+        binaries = list((self.home / '.codex/packages').glob('*/current/bin/codex'))
+        before = {p: p.read_bytes() for p in binaries}
+        self.install()
+        self.assertEqual(before, {p: p.read_bytes() for p in binaries})
+        backups = list((self.home / '.local/state/codex-m-commands').iterdir())
+        self.assertEqual(len(backups), 1)
+        self.assertTrue((backups[0] / 'codex').is_symlink())
+        line = 'source "$HOME/.config/codex-m/shell.bash"'
+        self.assertEqual((self.home / '.bashrc').read_text().count(line), 1)
 
 
 if __name__ == '__main__':

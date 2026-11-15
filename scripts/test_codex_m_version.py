@@ -13,6 +13,20 @@ spec.loader.exec_module(version)
 
 
 class VersionTest(unittest.TestCase):
+    def test_lockfile_includes_versions_of_implicit_workspace_members(self):
+        # Cargo also discovers path dependencies that aren't listed in workspace.members.
+        root = SCRIPT.parent.parent
+        expected = version.tomllib.loads((root / version.MANIFEST).read_text())['workspace']['package']['version']
+        packages = version.tomllib.loads((root / 'codex-rs/Cargo.lock').read_text())['package']
+        locked = {package['name']: package['version'] for package in packages if 'source' not in package}
+        manifests = subprocess.check_output(
+            ['git', 'ls-files', 'codex-rs/**/Cargo.toml'], cwd=root, text=True).splitlines()
+        for manifest in manifests:
+            package = version.tomllib.loads((root / manifest).read_text()).get('package', {})
+            if package.get('version') == {'workspace': True} and package['name'] in locked:
+                with self.subTest(package=package['name']):
+                    self.assertEqual(locked[package['name']], expected)
+
     def test_stable_tag_and_no_downgrade(self):
         self.assertEqual(version.fork_version('rust-v0.169.0', '0.167.0-codex-m.1'), '0.169.0-codex-m.1')
         for tag in ['rust-v0.169.0-alpha.1', 'rusty-v8-v150.4.0', 'rust-v0.166.0']:

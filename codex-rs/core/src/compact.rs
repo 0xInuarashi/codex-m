@@ -5,7 +5,9 @@ use std::time::Instant;
 
 use crate::Prompt;
 use crate::client::ModelClientSession;
+use crate::client::SamplingOptions;
 use crate::client_common::ResponseEvent;
+use crate::client_common::SamplingEvent;
 use crate::compact_pending_input::is_retained_pending_mail;
 use crate::compact_remote_v2::retained_client_items;
 use crate::context::BaseInstructionsFragment;
@@ -37,6 +39,7 @@ use codex_analytics::CompactionStatus;
 use codex_analytics::CompactionStrategy;
 use codex_analytics::CompactionTrigger;
 use codex_analytics::now_unix_seconds;
+use codex_async_utils::OrCancelExt;
 use codex_context_fragments::AnnotatedContent;
 use codex_context_fragments::set_annotated_content;
 use codex_context_fragments::truncate_annotated_text;
@@ -59,7 +62,6 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::user_input::UserInput;
 use codex_rollout_trace::InferenceTraceContext;
 use codex_utils_output_truncation::approx_token_count;
-use futures::prelude::*;
 use tracing::error;
 
 pub use codex_prompts::SUMMARIZATION_PROMPT;
@@ -120,13 +122,14 @@ fn assemble_compaction_history(
 
 pub(crate) async fn run_inline_auto_compact_task(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
     replacement_step_context: Arc<StepContext>,
     world_state: Arc<WorldState>,
     reason: CompactionReason,
     phase: CompactionPhase,
-) -> CodexResult<()> {
-    let prompt = turn_context
+) -> CodexResult<bool> {
+    let prompt = step_context
+        .turn
         .config
         .compact_prompt
         .as_deref()
@@ -140,7 +143,7 @@ pub(crate) async fn run_inline_auto_compact_task(
 
     run_compact_task_inner(
         sess,
-        turn_context,
+        step_context,
         replacement_step_context,
         input,
         world_state,
@@ -151,8 +154,7 @@ pub(crate) async fn run_inline_auto_compact_task(
             phase,
         ),
     )
-    .await?;
-    Ok(())
+    .await
 }
 
 pub(crate) async fn run_compact_task(
@@ -163,7 +165,7 @@ pub(crate) async fn run_compact_task(
 ) -> CodexResult<()> {
     run_compact_task_inner(
         sess.clone(),
-        Arc::clone(&step_context.turn),
+        Arc::clone(&step_context),
         step_context,
         input,
         world_state,
@@ -180,12 +182,13 @@ pub(crate) async fn run_compact_task(
 
 async fn run_compact_task_inner(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
     replacement_step_context: Arc<StepContext>,
     input: Vec<UserInput>,
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
-) -> CodexResult<()> {
+) -> CodexResult<bool> {
+    let turn_context = Arc::clone(&step_context.turn);
     let trigger = compaction_metadata.trigger();
     let reason = compaction_metadata.reason();
     let phase = compaction_metadata.phase();
@@ -216,7 +219,7 @@ async fn run_compact_task_inner(
     }
     let result = run_compact_task_inner_impl(
         Arc::clone(&sess),
-        Arc::clone(&turn_context),
+        step_context,
         replacement_step_context,
         input,
         world_state,
@@ -247,12 +250,13 @@ async fn run_compact_task_inner(
             CompactionAnalyticsDetails::default(),
         )
         .await;
+    // Keep an installed checkpoint and its analytics. An inline stop hands control
+    // back to the root if the deadline permits its final answer.
+    let result = sess.finish_compaction(&turn_context, phase, result.map(|_| true));
     if let Err(err) = &result
         && !matches!(phase, CompactionPhase::PostTurn)
-        && !matches!(
-            err.details(),
-            CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
-        )
+        && !matches!(err.details(), CodexErrorDetails::Interrupted)
+        && !crate::tasks::ends_turn_as_interrupted(err)
     {
         sess.track_turn_codex_error(turn_context.as_ref(), err);
         // Pre-turn failures are reported after preserving the incoming prompt.
@@ -261,36 +265,28 @@ async fn run_compact_task_inner(
             sess.send_event(&turn_context, event).await;
         }
     }
-    result.map(|_| ())
+    result
 }
 
 async fn run_compact_task_inner_impl(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
     replacement_step_context: Arc<StepContext>,
     input: Vec<UserInput>,
     world_state: Arc<WorldState>,
     compaction_metadata: CompactionTurnMetadata,
 ) -> CodexResult<String> {
-    let turn_context = if turn_context.config.model_routing.compaction_model.is_some()
-        || turn_context
-            .config
-            .model_routing
-            .compaction_service_tier
-            .is_some()
-        || turn_context
-            .config
-            .model_routing
-            .compaction_reasoning_effort
-            .is_some()
-    {
-        Arc::new(turn_context.for_compaction(&sess).await)
-    } else {
-        turn_context
-    };
+    let step_context = Arc::new(step_context.for_compaction(&sess).await);
+    let turn_context = Arc::clone(&step_context.turn);
+    let mut request = crate::hook_runtime::sampling::SamplingRequest::new(
+        codex_hooks::SamplingKind::ForegroundCompaction,
+    );
     let compaction_item = TurnItem::ContextCompaction(ContextCompactionItem::new());
-    sess.emit_turn_item_started(&turn_context, &compaction_item)
-        .await;
+    let defer_start = sess.defer_compaction_start(&turn_context, compaction_metadata.phase());
+    if !defer_start {
+        sess.emit_turn_item_started(&turn_context, &compaction_item)
+            .await;
+    }
     let initial_input_for_turn: ResponseInputItem = ResponseInputItem::from(input);
 
     let mut history = sess.clone_history().await;
@@ -347,11 +343,12 @@ async fn run_compact_task_inner_impl(
             ..Default::default()
         };
         let responses_metadata = sess
-            .compaction_responses_metadata(turn_context.as_ref(), compaction_metadata)
+            .compaction_responses_metadata(&step_context, compaction_metadata)
             .await;
         let attempt_result = drain_to_completed(
+            &mut request,
             &sess,
-            turn_context.as_ref(),
+            &step_context,
             &mut client_session,
             &responses_metadata,
             &Arc::new(prompt),
@@ -456,6 +453,10 @@ async fn run_compact_task_inner_impl(
     let (prefix, context) = split_prefix_updates(updates);
     let new_history =
         assemble_compaction_history(new_history, prefix, merge_world_state_updates(context));
+    if defer_start {
+        sess.emit_turn_item_started(&turn_context, &compaction_item)
+            .await;
+    }
     sess.replace_compacted_history(
         new_history,
         replacement_step_context.to_turn_context_item(),
@@ -580,8 +581,8 @@ pub(crate) fn compaction_status_from_result<T>(result: &CodexResult<T>) -> Compa
         Err(err)
             if matches!(
                 err.details(),
-                CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
-            ) =>
+                CodexErrorDetails::Interrupted | CodexErrorDetails::SessionBudgetExceeded
+            ) || crate::tasks::ends_turn_as_interrupted(err) =>
         {
             CompactionStatus::Interrupted
         }
@@ -866,45 +867,57 @@ struct CompactionResponse {
 }
 
 async fn drain_to_completed(
-    sess: &Session,
-    turn_context: &TurnContext,
+    request: &mut crate::hook_runtime::sampling::SamplingRequest,
+    sess: &Arc<Session>,
+    step_context: &Arc<StepContext>,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
     prompt: &Arc<Prompt>,
     phase: CompactionPhase,
 ) -> CodexResult<CompactionResponse> {
+    let turn_context = step_context.turn.as_ref();
     let mut includes_reasoning = turn_context.model_info().use_responses_lite;
-    let mut stream = client_session
-        .stream(
-            prompt,
-            turn_context.model_info(),
-            &turn_context.session_telemetry,
-            if turn_context
-                .config
-                .model_routing
-                .compaction_reasoning_effort
-                .is_some()
-            {
-                turn_context.initial_settings.effective_reasoning_effort()
-            } else {
-                sess.reasoning_effort_for_request(
-                    &turn_context.initial_settings,
-                    RequestEffortUsage::Compaction,
-                )
-                .await
-            },
-            turn_context.reasoning_summary(),
-            turn_context.config.service_tier.clone(),
-            responses_metadata,
-            // Rollout tracing currently models remote compaction only; local compaction streams
-            // are left untraced until the reducer has a first-class local compaction lifecycle.
-            &InferenceTraceContext::disabled(),
+    let cancellation = &step_context.turn_cancellation;
+    let mut stream = request
+        .open(
+            sess,
+            step_context,
+            &turn_context.model_info().slug,
+            cancellation,
+            client_session.open_model_response(
+                prompt,
+                turn_context.model_info(),
+                &turn_context.session_telemetry,
+                SamplingOptions {
+                    reasoning_effort: if turn_context
+                        .config
+                        .model_routing
+                        .compaction_reasoning_effort
+                        .is_some()
+                    {
+                        turn_context.initial_settings.effective_reasoning_effort()
+                    } else {
+                        sess.reasoning_effort_for_request(
+                            &turn_context.initial_settings,
+                            RequestEffortUsage::Compaction,
+                        )
+                        .await
+                    },
+                    reasoning_summary: turn_context.reasoning_summary(),
+                    service_tier: turn_context.config.service_tier.clone(),
+                },
+                responses_metadata,
+                // Rollout tracing currently models remote compaction only; local compaction streams
+                // are left untraced until the reducer has a first-class local compaction lifecycle.
+                &InferenceTraceContext::disabled(),
+            ),
         )
-        .await?;
+        .or_cancel(cancellation)
+        .await??;
     let mut output = Vec::new();
     loop {
-        let maybe_event = stream.next().await;
-        let Some(event) = maybe_event else {
+        let Some(SamplingEvent { event, hook_output }) = stream.next_for_turn(cancellation).await
+        else {
             return Err(CodexErr::Stream(
                 "stream closed before response.completed".into(),
             ));
@@ -949,7 +962,10 @@ async fn drain_to_completed(
                 .await;
                 sess.update_token_usage_info(
                     turn_context,
-                    token_usage.as_ref(),
+                    crate::client_common::SamplingUsage {
+                        provider: token_usage,
+                        charge: hook_output,
+                    },
                     includes_reasoning,
                 )
                 .await?;
@@ -965,6 +981,7 @@ async fn drain_to_completed(
                         turn_context,
                         &turn_context.initial_settings,
                         incomplete,
+                        hook_output,
                     )
                     .await;
                     sess.send_token_count_event(turn_context).await;

@@ -33,8 +33,11 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 
+mod response_delivery;
 #[path = "client_tool_metadata.rs"]
 mod tool_metadata;
+
+use response_delivery::ResponseDelivery;
 
 use crate::CodexResponsesHeaders;
 use crate::PromptCacheKey;
@@ -126,12 +129,14 @@ use crate::attestation::X_OAI_ATTESTATION_HEADER;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
+use crate::client_common::SamplingStream;
 use crate::context::BaseInstructionsFragment;
 use crate::context::ContextualUserFragment;
 use crate::cyber_access_program;
 use crate::feedback_tags;
 use crate::responses_metadata::CodexResponsesMetadata;
 use crate::responses_metadata::subagent_header_value;
+use crate::session::turn_context::TurnContext;
 use crate::util::emit_feedback_auth_recovery_tags;
 use codex_feedback::FeedbackRequestTags;
 use codex_feedback::emit_feedback_request_tags_with_auth_env;
@@ -307,6 +312,7 @@ pub struct ModelClient {
     http_client_factory: HttpClientFactory,
     restored_history: bool,
     request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
+    budget_policy: Option<crate::rollout_budget::ThreadBudgetPolicy>,
     executed_tool_calls: Option<ExecutedToolCalls>,
     // Resolved once when the session is created, like other session feature flags.
     api_key_cyber_access_programs: cyber_access_program::ApiKeyCyberAccessPrograms,
@@ -425,6 +431,7 @@ impl NonIncrementalReason {
 // This is intentionally not a `PartialEq` implementation: request equality includes `input` and
 // `client_metadata`, while websocket reuse compares input and late tool-result metadata separately.
 // Access programs are authorized per response, including continuations, without replaying input.
+// Request country is also per response and travels on every continuation.
 // Keep the destructuring exhaustive so new request fields require an explicit reuse decision.
 fn responses_request_properties_mismatch(
     previous: &ResponsesApiRequest,
@@ -447,6 +454,7 @@ fn responses_request_properties_mismatch(
         text: previous_text,
         client_metadata: _,
         access_programs: _,
+        request_country: _,
     } = previous;
     let ResponsesApiRequest {
         model: current_model,
@@ -465,6 +473,7 @@ fn responses_request_properties_mismatch(
         text: current_text,
         client_metadata: _,
         access_programs: _,
+        request_country: _,
     } = current;
 
     // Stream options control delivery for this response, not the context
@@ -549,8 +558,16 @@ impl WebsocketSession {
     }
 }
 
+/// Generation settings shared by HTTP and WebSocket, including transport fallback.
+#[derive(Clone)]
+pub(crate) struct SamplingOptions {
+    pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
+    pub(crate) reasoning_summary: ReasoningSummaryConfig,
+    pub(crate) service_tier: Option<String>,
+}
+
 enum WebsocketStreamOutcome {
-    Stream(ResponseStream),
+    Stream(Box<OpenedModelResponse>),
     FallbackToHttp,
 }
 
@@ -644,6 +661,7 @@ impl ModelClient {
             http_client_factory,
             restored_history: false,
             request_contributors,
+            budget_policy: None,
             executed_tool_calls: None,
             api_key_cyber_access_programs:
                 cyber_access_program::ApiKeyCyberAccessPrograms::UnsupportedProvider,
@@ -653,6 +671,14 @@ impl ModelClient {
 
     pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
         self.executed_tool_calls = Some(recorder);
+        self
+    }
+
+    pub(crate) fn with_budget_policy(
+        mut self,
+        policy: crate::rollout_budget::ThreadBudgetPolicy,
+    ) -> Self {
+        self.budget_policy = Some(policy);
         self
     }
 
@@ -1311,8 +1337,17 @@ impl ModelClient {
             text,
             client_metadata: Some(client_metadata),
             access_programs: None,
+            request_country: Default::default(),
         };
         Ok(request)
+    }
+
+    fn check_generation_start(&self, metadata: &CodexResponsesMetadata) -> Result<()> {
+        if let Some(policy) = &self.budget_policy {
+            let _ = metadata;
+            policy.check_start()?;
+        }
+        Ok(())
     }
 
     fn prepare_response_items_for_request(&self, input: &mut [ResponseItem]) {
@@ -1974,12 +2009,10 @@ impl ResponsesHttpExecutor<'_> {
         prompt: &Arc<Prompt>,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
-        effort: Option<ReasoningEffortConfig>,
-        summary: ReasoningSummaryConfig,
-        service_tier: Option<String>,
+        sampling: SamplingOptions,
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
-    ) -> Result<ResponseStream> {
+    ) -> Result<OpenedModelResponse> {
         let auth_manager = self.client.state.provider.auth_manager();
         let mut auth_recovery = auth_manager
             .as_ref()
@@ -2032,12 +2065,15 @@ impl ResponsesHttpExecutor<'_> {
             let mut request = self.client.build_responses_request(
                 prompt,
                 model_info,
-                effort.clone(),
-                summary,
-                service_tier.clone(),
+                sampling.reasoning_effort.clone(),
+                sampling.reasoning_summary,
+                sampling.service_tier.clone(),
                 responses_metadata,
                 include_internal,
             )?;
+            if self.client.uses_codex_backend(client_setup.auth.as_ref()) {
+                request.request_country = responses_metadata.request_country.clone();
+            }
             self.client.set_guardian_metadata(
                 &mut request.client_metadata,
                 responses_metadata.parent_response_id.as_deref(),
@@ -2081,6 +2117,7 @@ impl ResponsesHttpExecutor<'_> {
             {
                 continue;
             }
+            self.client.check_generation_start(responses_metadata)?;
             let interceptors = crate::model_request::prepare(
                 &self.client.request_contributors,
                 &thread_id,
@@ -2114,14 +2151,14 @@ impl ResponsesHttpExecutor<'_> {
 
             match stream_result {
                 Ok(stream) => {
-                    return Ok(map_response_stream(
+                    return Ok(OpenedModelResponse {
                         stream,
-                        request_session_telemetry,
-                        inference_trace_attempt,
-                        &self.client.state,
+                        telemetry: request_session_telemetry,
+                        trace: inference_trace_attempt,
+                        client: Arc::clone(&self.client.state),
                         interceptors,
-                        /*last_response_tx*/ None,
-                    ));
+                        continuation: None,
+                    });
                 }
                 Err(ApiError::Transport(unauthorized_transport))
                     if self
@@ -2188,9 +2225,7 @@ impl ModelClientSession {
         prompt: &Arc<Prompt>,
         model_info: &ModelInfo,
         session_telemetry: &SessionTelemetry,
-        effort: Option<ReasoningEffortConfig>,
-        summary: ReasoningSummaryConfig,
-        service_tier: Option<String>,
+        sampling: SamplingOptions,
         responses_metadata: &CodexResponsesMetadata,
         warmup: bool,
         request_trace: Option<W3cTraceContext>,
@@ -2237,12 +2272,15 @@ impl ModelClientSession {
             let mut request = self.client.build_responses_request(
                 prompt,
                 model_info,
-                effort.clone(),
-                summary,
-                service_tier.clone(),
+                sampling.reasoning_effort.clone(),
+                sampling.reasoning_summary,
+                sampling.service_tier.clone(),
                 responses_metadata,
                 include_internal,
             )?;
+            if self.client.uses_codex_backend(client_setup.auth.as_ref()) {
+                request.request_country = responses_metadata.request_country.clone();
+            }
             if is_guardian_reviewer(&responses_headers) {
                 request.service_tier = None;
             }
@@ -2409,6 +2447,9 @@ impl ModelClientSession {
                 client_setup.auth.as_ref(),
                 &responses_headers,
             );
+            if !warmup {
+                self.client.check_generation_start(responses_metadata)?;
+            }
             let interceptors = crate::model_request::prepare(
                 &self.client.request_contributors,
                 &thread_id,
@@ -2499,16 +2540,16 @@ impl ModelClientSession {
                 err
             })?;
             let (last_response_tx, last_response_rx) = oneshot::channel();
-            let stream = map_response_stream(
-                stream_result,
-                request_session_telemetry,
-                inference_trace_attempt,
-                &self.client.state,
+            let stream = OpenedModelResponse {
+                stream: stream_result,
+                telemetry: request_session_telemetry,
+                trace: inference_trace_attempt,
+                client: Arc::clone(&self.client.state),
                 interceptors,
-                Some(last_response_tx),
-            );
+                continuation: Some(last_response_tx),
+            };
             self.websocket_session.last_response_rx = Some(last_response_rx);
-            return Ok(WebsocketStreamOutcome::Stream(stream));
+            return Ok(WebsocketStreamOutcome::Stream(Box::new(stream)));
         }
     }
 
@@ -2583,9 +2624,11 @@ impl ModelClientSession {
                 prompt,
                 model_info,
                 session_telemetry,
-                effort,
-                summary,
-                service_tier,
+                SamplingOptions {
+                    reasoning_effort: effort,
+                    reasoning_summary: summary,
+                    service_tier,
+                },
                 responses_metadata,
                 /*warmup*/ true,
                 current_span_w3c_trace_context(),
@@ -2593,7 +2636,8 @@ impl ModelClientSession {
             )
             .await
         {
-            Ok(WebsocketStreamOutcome::Stream(mut stream)) => {
+            Ok(WebsocketStreamOutcome::Stream(opened)) => {
+                let mut stream = (*opened).into_raw_stream()?;
                 // Wait for the v2 warmup request to complete before sending the first turn request.
                 while let Some(event) = stream.next().await {
                     match event {
@@ -2636,6 +2680,31 @@ impl ModelClientSession {
         responses_metadata: &CodexResponsesMetadata,
         inference_trace: &InferenceTraceContext,
     ) -> Result<ResponseStream> {
+        self.open_model_response(
+            prompt,
+            model_info,
+            session_telemetry,
+            SamplingOptions {
+                reasoning_effort: effort,
+                reasoning_summary: summary,
+                service_tier,
+            },
+            responses_metadata,
+            inference_trace,
+        )
+        .await?
+        .into_raw_stream()
+    }
+
+    pub(crate) async fn open_model_response(
+        &mut self,
+        prompt: &Arc<Prompt>,
+        model_info: &ModelInfo,
+        session_telemetry: &SessionTelemetry,
+        sampling: SamplingOptions,
+        responses_metadata: &CodexResponsesMetadata,
+        inference_trace: &InferenceTraceContext,
+    ) -> Result<OpenedModelResponse> {
         let wire_api = self.client.state.provider.info().wire_api;
         match wire_api {
             WireApi::Responses => {
@@ -2646,9 +2715,7 @@ impl ModelClientSession {
                             prompt,
                             model_info,
                             session_telemetry,
-                            effort.clone(),
-                            summary,
-                            service_tier.clone(),
+                            sampling.clone(),
                             responses_metadata,
                             /*warmup*/ false,
                             request_trace,
@@ -2656,7 +2723,7 @@ impl ModelClientSession {
                         )
                         .await?
                     {
-                        WebsocketStreamOutcome::Stream(stream) => return Ok(stream),
+                        WebsocketStreamOutcome::Stream(stream) => return Ok(*stream),
                         WebsocketStreamOutcome::FallbackToHttp => {
                             self.try_switch_fallback_transport(session_telemetry, model_info);
                         }
@@ -2671,9 +2738,7 @@ impl ModelClientSession {
                         prompt,
                         model_info,
                         session_telemetry,
-                        effort,
-                        summary,
-                        service_tier,
+                        sampling,
                         responses_metadata,
                         inference_trace,
                     )
@@ -2760,29 +2825,63 @@ fn add_responses_lite_header(headers: &mut ApiHeaderMap, use_responses_lite: boo
 const RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 1600;
 const STREAM_DROPPED_REASON: &str = "response stream dropped before provider terminal event";
 
-fn map_response_stream(
-    mut api_stream: codex_api::ResponseStream,
-    session_telemetry: SessionTelemetry,
-    inference_trace_attempt: InferenceTraceAttempt,
-    client: &ModelClientState,
+/// The transport has opened the provider stream. Its caller now chooses whether
+/// a synchronous post-hook must finish before Core can use the response.
+pub(crate) struct OpenedModelResponse {
+    stream: codex_api::ResponseStream,
+    telemetry: SessionTelemetry,
+    trace: InferenceTraceAttempt,
+    client: Arc<ModelClientState>,
     interceptors: Vec<Box<dyn codex_extension_api::ModelResponseInterceptor>>,
-    last_response_tx: Option<oneshot::Sender<LastResponse>>,
-) -> ResponseStream {
-    let routing_affinity = api_stream.routing_affinity.take();
-    let upstream_request_id = api_stream.upstream_request_id.take();
-    let interrupt = api_stream.interrupt.take();
-    let events = crate::model_request::intercept_stream(Box::pin(api_stream), interceptors);
-    let mut stream = map_response_events(
-        upstream_request_id,
-        events,
-        session_telemetry,
-        inference_trace_attempt,
-        client,
-        last_response_tx,
-    );
-    stream.interrupt = interrupt;
-    stream.routing_affinity = routing_affinity;
-    stream
+    continuation: Option<oneshot::Sender<LastResponse>>,
+}
+
+impl OpenedModelResponse {
+    fn into_raw_stream(self) -> Result<ResponseStream> {
+        self.deliver(
+            &mut None, /*sampling_turn*/ None, /*settlement*/ None,
+        )
+        .map(ResponseStream)
+    }
+
+    pub(crate) fn deliver(
+        mut self,
+        attempt: &mut Option<crate::hook_runtime::sampling::SamplingAttempt>,
+        sampling_turn: Option<Arc<TurnContext>>,
+        settlement: Option<(Arc<crate::session::session::Session>, Arc<TurnContext>)>,
+    ) -> Result<SamplingStream> {
+        let delivery = ResponseDelivery::new(attempt, settlement);
+        let routing_affinity = self.stream.routing_affinity.take();
+        let request_id = self.stream.upstream_request_id.take();
+        let interrupt = self.stream.interrupt.take();
+        // A response interceptor can hold even the first token until completion. Measure
+        // ordinary turn TTFT on the decoded provider stream, before any such wait.
+        let provider_stream = if let Some(turn) = sampling_turn {
+            futures::stream::unfold((self.stream, turn), |(mut stream, turn)| async move {
+                let event = stream.next().await?;
+                if let Ok(event) = &event {
+                    crate::turn_timing::record_turn_ttft_metric(&turn, event).await;
+                }
+                Some((event, (stream, turn)))
+            })
+            .boxed()
+        } else {
+            self.stream.boxed()
+        };
+        let events = crate::model_request::intercept_stream(provider_stream, self.interceptors);
+        let mut stream = map_response_events(
+            request_id,
+            events,
+            self.telemetry,
+            self.trace,
+            &self.client,
+            self.continuation,
+            delivery,
+        );
+        stream.interrupt = interrupt;
+        stream.routing_affinity = routing_affinity;
+        Ok(stream)
+    }
 }
 
 fn map_response_events<S>(
@@ -2792,17 +2891,18 @@ fn map_response_events<S>(
     inference_trace_attempt: InferenceTraceAttempt,
     client: &ModelClientState,
     mut last_response_tx: Option<oneshot::Sender<LastResponse>>,
-) -> ResponseStream
+    mut delivery: ResponseDelivery,
+) -> SamplingStream
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
         + Unpin
         + Send
         + 'static,
 {
-    let (tx_event, rx_event) =
-        mpsc::channel::<Result<ResponseEvent>>(RESPONSE_STREAM_CHANNEL_CAPACITY);
+    let (tx_event, rx_event) = mpsc::channel(RESPONSE_STREAM_CHANNEL_CAPACITY);
     let consumer_dropped = CancellationToken::new();
     let consumer_dropped_for_stream = consumer_dropped.clone();
+    let settlement_started = Arc::clone(&delivery.settlement_started);
     let provider = Arc::clone(&client.provider);
     let item_id_generator = Arc::clone(&client.item_id_generator);
 
@@ -2833,7 +2933,15 @@ where
             let Some(event) = event else {
                 break;
             };
-            match event {
+            let overflow = delivery.would_overflow(&event);
+            let event = if overflow {
+                Err(ApiError::Stream(
+                    "sampling response exceeded event buffer limit".to_owned(),
+                ))
+            } else {
+                event
+            };
+            let event = match event {
                 Ok(ResponseEvent::OutputItemDone(mut item)) => {
                     // Assign IDs after interceptors, which may replace provider items.
                     // Reuse the added event's ID so tracing and the harness agree.
@@ -2848,18 +2956,7 @@ where
                     if collect_output_items {
                         items_added.push(item.clone());
                     }
-                    if tx_event
-                        .send(Ok(ResponseEvent::OutputItemDone(item)))
-                        .await
-                        .is_err()
-                    {
-                        inference_trace_attempt.record_cancelled(
-                            STREAM_DROPPED_REASON,
-                            upstream_request_id,
-                            &items_added,
-                        );
-                        return;
-                    }
+                    Ok(ResponseEvent::OutputItemDone(item))
                 }
                 Ok(ResponseEvent::Completed {
                     response_id,
@@ -2885,19 +2982,13 @@ where
                         });
                     }
                     items_added = Vec::new();
-                    if tx_event
-                        .send(Ok(ResponseEvent::Completed {
-                            response_id,
-                            token_usage,
-                            usage_metadata,
-                            reasoning_removals,
-                            end_turn,
-                        }))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
+                    Ok(ResponseEvent::Completed {
+                        response_id,
+                        token_usage,
+                        usage_metadata,
+                        reasoning_removals,
+                        end_turn,
+                    })
                 }
                 Ok(mut event) => {
                     if let ResponseEvent::OutputItemAdded(item) = &mut event {
@@ -2911,14 +3002,7 @@ where
                             i64::try_from(request_start.elapsed().as_millis()).unwrap_or(i64::MAX),
                         );
                     }
-                    if tx_event.send(Ok(event)).await.is_err() {
-                        inference_trace_attempt.record_cancelled(
-                            STREAM_DROPPED_REASON,
-                            upstream_request_id,
-                            &items_added,
-                        );
-                        return;
-                    }
+                    Ok(event)
                 }
                 Err(err) => {
                     let response_debug_context =
@@ -2957,10 +3041,22 @@ where
                         session_telemetry.see_event_completed_failed(&mapped);
                         logged_error = true;
                     }
-                    if tx_event.send(Err(mapped)).await.is_err() {
-                        return;
-                    }
+                    Err(mapped)
                 }
+            };
+            let terminal = matches!(&event, Ok(ResponseEvent::Completed { .. }) | Err(_));
+            if !delivery.send_or_hold(event, &tx_event).await {
+                if !terminal {
+                    inference_trace_attempt.record_cancelled(
+                        STREAM_DROPPED_REASON,
+                        upstream_request_id,
+                        &items_added,
+                    );
+                }
+                return;
+            }
+            if overflow {
+                return;
             }
         }
         inference_trace_attempt.record_failed(
@@ -2968,13 +3064,15 @@ where
             upstream_request_id,
             &items_added,
         );
+        delivery.finish_eof(&tx_event).await;
     });
 
-    ResponseStream {
+    SamplingStream {
         routing_affinity: None,
         rx_event,
         interrupt: None,
         consumer_dropped: consumer_dropped_for_stream,
+        settlement_started,
     }
 }
 

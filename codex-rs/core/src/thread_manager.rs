@@ -207,6 +207,16 @@ pub enum ThreadRegistration {
     Replaced,
 }
 
+/// A manager-started runtime's receipt stays committed across unload. A runtime
+/// started without a manager has no receipt in its thread extension store.
+pub struct ThreadRegistrationReceipt(Arc<AtomicBool>);
+
+impl ThreadRegistrationReceipt {
+    pub fn was_registered(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
 // TODO(ccunningham): Add an explicit non-interrupting live-turn snapshot once
 // core can represent sampling boundaries directly instead of relying on
 // whichever items happened to be persisted mid-turn.
@@ -344,6 +354,8 @@ pub enum PromptCacheKey {
 
 pub struct StartThreadOptions {
     pub config: Config,
+    /// Trusted host country for the initial thread settings.
+    pub request_country: codex_protocol::RequestCountry,
     /// Request-body cache key policy for this thread and its children. Hosts must reapply it on cold resume.
     pub prompt_cache_key: PromptCacheKey,
     /// Host-owned provider for this root thread's additional instructions.
@@ -441,6 +453,7 @@ impl StartThreadOptions {
     pub fn new(config: Config) -> Self {
         Self {
             config,
+            request_country: codex_protocol::RequestCountry::default(),
             prompt_cache_key: PromptCacheKey::default(),
             thread_instructions_provider: None,
             allow_provider_model_fallback: false,
@@ -566,6 +579,7 @@ fn effective_originator_value(
 
 pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) config: Config,
+    pub(crate) request_country: codex_protocol::RequestCountry,
     pub(crate) prompt_cache_key: Option<PromptCacheKey>,
     pub(crate) initial_history: InitialHistory,
     pub(crate) agent_control: LocalAgentControl,
@@ -1783,6 +1797,7 @@ impl ThreadManager {
         thread_extension_init.insert(reasoning_effort_pin);
         Ok((
             StartThreadOptions {
+                request_country: settings.request_country,
                 history_mode: Some(settings.history_mode),
                 environments: Some(settings.environments.into_requests().environment_requests),
                 inherited_environments: Some(environments),
@@ -2409,6 +2424,7 @@ impl ThreadManagerState {
     ) -> CodexResult<NewThread> {
         let ResumeThreadWithHistoryOptions {
             config,
+            request_country,
             prompt_cache_key,
             initial_history,
             agent_control,
@@ -2426,6 +2442,7 @@ impl ThreadManagerState {
         let prompt_cache_key = prompt_cache_key.unwrap_or(inherited_prompt_cache_key);
         let thread_source = initial_history.get_resumed_thread_source();
         let options = StartThreadOptions {
+            request_country,
             prompt_cache_key,
             initial_history,
             session_source: Some(session_source),
@@ -2556,6 +2573,7 @@ impl ThreadManagerState {
         };
         let StartThreadOptions {
             mut config,
+            request_country,
             prompt_cache_key,
             thread_instructions_provider,
             allow_provider_model_fallback,
@@ -2895,10 +2913,13 @@ impl ThreadManagerState {
                 &session_source,
             ) => manager,
         };
+        let registered = Arc::new(AtomicBool::new(false));
+        thread_extension_init.insert(ThreadRegistrationReceipt(Arc::clone(&registered)));
         let spawn_result = Session::spawn(SessionSpawnArgs {
             attached_thread,
             startup,
             config,
+            request_country,
             prompt_cache_key,
             allow_provider_model_fallback,
             instructions: startup_context.instructions,
@@ -2988,7 +3009,7 @@ impl ThreadManagerState {
             }
         }
         let finalize_result = self
-            .finalize_thread_spawn(session, io, tracked_session_source)
+            .finalize_thread_spawn(session, io, tracked_session_source, &registered)
             .await;
         let (new_thread, tier_acceptance) = match finalize_result {
             Ok(registered) => registered,
@@ -3031,6 +3052,7 @@ impl ThreadManagerState {
         session: Arc<Session>,
         io: SessionIo,
         session_source: SessionSource,
+        registered: &AtomicBool,
     ) -> CodexResult<(NewThread, Option<ServiceTierAcceptance>)> {
         let thread_id = session.thread_id();
         let event = io.next_event().await?;
@@ -3071,6 +3093,8 @@ impl ThreadManagerState {
                     session_configured.rollout_path.clone(),
                     session_source,
                 ));
+                // All registration checks passed; publish the receipt with this insertion.
+                registered.store(true, Ordering::Release);
                 e.insert(thread.clone());
                 let tier_acceptance = pending_service_tier.and_then(|(mut state, update)| {
                     state.service_tier_acceptance =
@@ -3306,14 +3330,18 @@ fn append_interrupted_boundary(
     match history {
         InitialHistory::New | InitialHistory::Cleared => {
             let mut history = Vec::new();
-            if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
+            if let Some(marker) =
+                interrupted_turn_history_marker(interrupted_marker, /*cause*/ None)
+            {
                 history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
             InitialHistory::Forked(history)
         }
         InitialHistory::Forked(mut history) => {
-            if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
+            if let Some(marker) =
+                interrupted_turn_history_marker(interrupted_marker, /*cause*/ None)
+            {
                 history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);
@@ -3321,7 +3349,9 @@ fn append_interrupted_boundary(
         }
         InitialHistory::Resumed(resumed) => {
             let mut history = Arc::unwrap_or_clone(resumed.history);
-            if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
+            if let Some(marker) =
+                interrupted_turn_history_marker(interrupted_marker, /*cause*/ None)
+            {
                 history.push(RolloutItem::ResponseItem(marker.into()));
             }
             history.push(aborted_event);

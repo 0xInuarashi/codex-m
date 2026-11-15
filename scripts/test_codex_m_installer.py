@@ -18,6 +18,25 @@ exec(compile(source, str(root / 'scripts/install/test_install_sh.py'), 'exec'), 
 namespace['INSTALL_SCRIPT'] = root / 'install.sh'
 
 class ForkInstallerTest(unittest.TestCase):
+    def test_update_preserves_shared_session_launcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)
+            archive, checksum, metadata = namespace['create_package_release'](
+                path, target='x86_64-unknown-linux-musl', include_exec_server=True)
+            launcher = path / 'home/.config/codex-m/command'
+            launcher.parent.mkdir(parents=True)
+            launcher.write_text((root / 'scripts/codex-m-command').read_text())
+            launcher.chmod(0o755)
+            installed = path / 'install-bin/codex-m'
+            installed.parent.mkdir()
+            installed.symlink_to(launcher)
+            result, _ = namespace['run_installer_in'](
+                path, 'latest', metadata_json=metadata, archive_path=archive, checksum_path=checksum)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(installed.readlink(), launcher)
+            current_binary = path / 'codex-home/packages/codex-m/current/bin/codex'
+            self.assertIn(namespace['VERSION'], subprocess.check_output([current_binary, '--version'], text=True))
+
     def test_running_and_previous_packages_survive_updates(self):
         namespace['InstallShTest']().test_standalone_retains_previous_and_running_releases_across_installs()
 

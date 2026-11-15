@@ -12,6 +12,11 @@ on:
       - 'scripts/build-codex-m.py'
       - 'scripts/test_codex_m_*.py'
       - 'scripts/check-codex-m-packaging.py'
+      - 'scripts/update-codex-m-version.py'
+      - '.github/scripts/install-codex-m-rust.sh'
+      - '.github/scripts/install-musl-*.sh'
+      - '.github/scripts/build-codex-package-archive.sh'
+      - '.github/actions/setup-rusty-v8/**'
   workflow_dispatch:
 permissions:
   contents: read
@@ -54,18 +59,8 @@ jobs:
           sudo apt-get install -y protobuf-compiler cmake libasound2-dev zstd
       - name: Check upstream packaging command before compiling
         run: python3 scripts/check-codex-m-packaging.py
-      - name: Read upstream Rust toolchain
-        id: rust_toolchain
-        run: |
-          python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
-          import pathlib, tomllib
-          version = tomllib.loads(pathlib.Path('codex-rs/rust-toolchain.toml').read_text())['toolchain']['channel']
-          print(f'version={version}')
-          PYTHON
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
-        with:
-          toolchain: ${{ steps.rust_toolchain.outputs.version }}
-          targets: x86_64-unknown-linux-musl
+      - name: Install and verify the workspace Rust toolchain
+        run: bash .github/scripts/install-codex-m-rust.sh "$TARGET"
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
         with:
           version: '0.14.0'

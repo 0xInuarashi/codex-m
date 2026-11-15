@@ -382,8 +382,11 @@ async fn run_remote_compaction_request_v2(
                         {
                             settings.effective_reasoning_effort()
                         } else {
-                            sess.reasoning_effort_for_request(settings, RequestEffortUsage::Compaction)
-                                .await
+                            sess.reasoning_effort_for_request(
+                                settings,
+                                RequestEffortUsage::Compaction,
+                            )
+                            .await
                         },
                         reasoning_summary: settings.reasoning_summary,
                         service_tier: step_context.settings.service_tier.clone(),

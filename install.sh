@@ -1230,7 +1230,12 @@ update_visible_command() {
   tmp_link="$BIN_DIR/.codex-m.$$"
   codex_relative_path="$(release_codex_relative_path "$release_dir")"
 
-  replace_path_with_symlink "$BIN_PATH" "$CURRENT_LINK/$codex_relative_path" "$tmp_link"
+  if [ "$(readlink "$BIN_PATH" 2>/dev/null || true)" = "$HOME/.config/codex-m/command" ] &&
+    [ -x "$HOME/.config/codex-m/command" ]; then
+    : # Preserve the installed shared-session and --yolo defaults.
+  else
+    replace_path_with_symlink "$BIN_PATH" "$CURRENT_LINK/$codex_relative_path" "$tmp_link"
+  fi
 
   if [ "$os" = "darwin" ] && [ -x "$release_dir/bin/codex-code-mode-host" ]; then
     replace_path_with_symlink \

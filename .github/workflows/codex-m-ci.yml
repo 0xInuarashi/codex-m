@@ -33,16 +33,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libcap-dev libasound2-dev bubblewrap clang cmake protobuf-compiler
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-      - name: Read upstream Rust toolchain
-        id: rust_toolchain
-        run: |
-          python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
-          import pathlib, tomllib
-          version = tomllib.loads(pathlib.Path('codex-rs/rust-toolchain.toml').read_text())['toolchain']['channel']
-          print(f'version={version}')
-          PYTHON
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582
-        with:
-          toolchain: ${{ steps.rust_toolchain.outputs.version }}
+      - name: Install and verify the workspace Rust toolchain
+        run: bash .github/scripts/install-codex-m-rust.sh
       - name: Build CLI and test routing, compaction, installation and updates
         run: python3 scripts/build-codex-m.py --test

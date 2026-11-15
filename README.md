@@ -126,7 +126,7 @@ which codex codex-m codex-o
 
 The installer preserves the previous command entries in `~/.local/state/codex-m-commands`, leaves package binaries intact, and adds a Bash startup hook that clears old aliases, functions, and cached command paths. The commands work without alias expansion, including in scripts and other shells with `~/.local/bin` on `PATH`. Maintenance and non-interactive commands retain their normal connection behavior. Explicit `--remote` addresses are respected; use `codex-m --no-daemon` for an independent local session.
 
-Rerunning the command installer is safe. Rerun it if a package installer or updater replaces the visible command links. Already-running independent sessions retain their conversation locks until they exit; installing launchers does not transfer or terminate them.
+The codex-m installer and native updater preserve these shared-session launchers. Rerunning the command installer is safe if another package installer replaces the visible command links. Already-running independent sessions retain their conversation locks until they exit; installing launchers does not transfer or terminate them.
 
 The launchers connect to an existing service; they do not install or start one. The service must run the fork binary, for example `codex-m app-server --remote-control --listen unix://`. The upstream daemon manager may select its separately installed standard Codex package even when invoked through `codex-m remote-control start`.
 
@@ -160,9 +160,11 @@ The installer preserves an existing codex-m configuration. Remove optional routi
 
 ## Update codex-m
 
-The [sync workflow](https://github.com/0xInuarashi/codex-m/actions/workflows/codex-m-sync.yml) merges upstream every six hours and publishes only after its build and regression checks pass. Conflicts or failing checks stop integration.
+The [sync workflow](https://github.com/0xInuarashi/codex-m/actions/workflows/codex-m-sync.yml) merges upstream main and the latest stable release every six hours, advances the fork's base version to that release, and publishes only after its build and regression checks pass. Release-specific fixes are included even when upstream main has not changed. Workspace-version conflicts are resolved automatically; source conflicts or failing checks stop integration.
 
 Changes on `main` trigger the [release workflow](https://github.com/0xInuarashi/codex-m/actions/workflows/codex-m-release.yml). Once a binary release is published, the native Codex update dialog offers it on startup. Update discovery is cached, so a new release may not appear immediately. An upstream commit alone is not an installable update.
+
+Publishing a release does not install it on your machine or restart a running remote-control service. After installing an update, restart that service to use the new binary; existing processes keep their previous version until restarted.
 
 To install the latest binary release immediately, rerun the curl installer above. Existing source installations can migrate with the same command. The older Python launcher still supports `codex-m update` for source builds; the native binary uses the startup dialog and installer instead.
 

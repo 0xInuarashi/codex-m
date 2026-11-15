@@ -29,30 +29,46 @@ jobs:
           ref: main
           fetch-depth: 0
           persist-credentials: false
-      - name: Merge upstream without changing the published branch
+      - name: Merge upstream and the latest stable release
         id: merge
+        env:
+          GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          before=$(git rev-parse HEAD)
+          release_tag=$(gh api repos/openai/codex/releases/latest --jq .tag_name)
+          [[ "$release_tag" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           git remote add upstream https://github.com/openai/codex.git
-          git fetch --no-tags upstream main
-          if git merge-base --is-ancestor upstream/main HEAD; then
+          git fetch --no-tags upstream main "refs/tags/$release_tag:refs/remotes/upstream/stable"
+          for ref in upstream/main upstream/stable; do
+            if ! git merge --no-edit "$ref"; then
+              # Version bumps are mechanical. Preserve every other conflict for review.
+              python3 scripts/update-codex-m-version.py "$release_tag" --resolve-merge
+              if [ -n "$(git diff --name-only --diff-filter=U)" ]; then
+                {
+                  echo '## Upstream merge needs manual resolution'
+                  echo 'The published fork and installed binaries are unchanged.'
+                  git diff --name-only --diff-filter=U
+                } >> "$GITHUB_STEP_SUMMARY"
+                exit 1
+              fi
+              git commit --no-edit
+            fi
+          done
+          python3 scripts/update-codex-m-version.py "$release_tag"
+          git add codex-rs/Cargo.toml
+          if ! git diff --cached --quiet; then
+            git commit -m "Track upstream release $release_tag"
+          fi
+          if [ "$before" = "$(git rev-parse HEAD)" ]; then
             echo 'changed=false' >> "$GITHUB_OUTPUT"
-            echo 'Already contains upstream/main.' >> "$GITHUB_STEP_SUMMARY"
-            exit 0
+            echo "Already contains upstream/main and $release_tag." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'changed=true' >> "$GITHUB_OUTPUT"
           fi
-          if ! git merge --no-edit upstream/main; then
-            {
-              echo '## Upstream merge needs manual resolution'
-              echo 'The published fork and installed binaries are unchanged.'
-              echo 'Conflicting files:'
-              git diff --name-only --diff-filter=U
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          echo 'changed=true' >> "$GITHUB_OUTPUT"
       - name: Prepare Linux build dependencies
         if: steps.merge.outputs.changed == 'true'
         run: |
@@ -61,6 +77,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends build-essential pkg-config libssl-dev libcap-dev libasound2-dev bubblewrap clang cmake protobuf-compiler
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Install and verify the workspace Rust toolchain
+        if: steps.merge.outputs.changed == 'true'
+        run: bash .github/scripts/install-codex-m-rust.sh
       - name: Refresh fork workspace versions in the lockfile
         if: steps.merge.outputs.changed == 'true'
         working-directory: codex-rs
@@ -69,7 +88,7 @@ jobs:
           # Preserve already-locked external dependencies while updating workspace entries.
           cargo update --workspace
           python3 ../scripts/generate-codex-m-installer.py
-          python3 -m unittest discover -s ../scripts -p test_codex_m_installer.py
+          python3 -m unittest discover -s ../scripts -p 'test_codex_m_*.py'
           git add Cargo.lock ../install.sh
           if ! git diff --cached --quiet; then
             git commit -m 'Refresh fork workspace lockfile after upstream merge'

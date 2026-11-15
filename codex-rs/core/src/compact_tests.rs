@@ -924,6 +924,64 @@ fn assemble_compaction_history_keeps_compaction_last() {
 }
 
 #[tokio::test]
+async fn compaction_routing_reaches_local_sampling_request() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = responses::start_mock_server().await;
+    let provider = ModelProviderInfo::create_openai_provider(Some(format!("{}/v1", server.uri())));
+    let (session, turn, _events) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+        Vec::new(),
+        move |config| {
+            config.model = Some("gpt-5.2".to_string());
+            config.model_provider = provider;
+            config.model_provider.supports_websockets = false;
+            config.model_routing.compaction_model = Some("gpt-5.5".to_string());
+            config.model_routing.compaction_service_tier = Some("priority".to_string());
+            config.model_routing.compaction_reasoning_effort =
+                Some(codex_protocol::openai_models::ReasoningEffort::Low);
+        },
+    )
+    .await;
+    let mock = responses::mount_sse_sequence(
+        &server,
+        vec![responses::sse(vec![
+            responses::ev_assistant_message("summary", "Compacted history."),
+            responses::ev_completed("compact-response"),
+        ])],
+    )
+    .await;
+    let step = session
+        .capture_step_context(
+            Arc::clone(&turn),
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await?;
+    let world_state = Arc::new(
+        session
+            .build_world_state_for_step(&step, /*new_window*/ true)
+            .await?,
+    );
+    run_compact_task(
+        Arc::clone(&session),
+        step,
+        world_state,
+        vec![UserInput::Text {
+            text: "Summarize the conversation.".to_string(),
+            text_elements: Vec::new(),
+        }],
+    )
+    .await?;
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 1);
+    let body = requests[0].body_json();
+    assert_eq!(body["model"], "gpt-5.5");
+    assert_eq!(body["service_tier"], "priority");
+    assert_eq!(body["reasoning"]["effort"], "low");
+    assert_eq!(turn.capture_current_model_info().slug, "gpt-5.2");
+    Ok(())
+}
+
+#[tokio::test]
 async fn configured_compaction_model_does_not_change_main_model() {
     let (session, turn, _events) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::create_dummy_chatgpt_auth_for_testing(),

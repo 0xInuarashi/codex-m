@@ -297,7 +297,23 @@ impl App {
         }
         let highlight_divider =
             self.pane_resize.is_some() || tui.link_hover.shape == tui::PointerShape::Resize;
-        let hovered_target = self.hovered_sidebar_target(tui.link_hover.position());
+        let pointer = tui
+            .link_hover
+            .mouse
+            .filter(|mouse| self.pane_resize.is_none() && !tui.shortcut_hud_contains(*mouse))
+            .map(|mouse| (mouse.column, mouse.row).into());
+        let tui_link_position = pointer.filter(|_| {
+            tui.link_hover.mouse.is_some_and(|mouse| {
+                mouse.modifiers.is_empty()
+                    || mouse.modifiers.intersects(
+                        crossterm::event::KeyModifiers::CONTROL
+                            | crossterm::event::KeyModifiers::SUPER,
+                    )
+            })
+        });
+        let sidebar_parent = self.sidebar_parent();
+        let sidebar_motion =
+            MotionMode::from_animations_enabled(self.local_settings.tui.animations);
         // An input refresh opens a fresh terminal buffer. Carry the outer owner's
         // completed cells through it when only the conversation is being redrawn.
         let backdrop = caller_inset.map(|_| {
@@ -330,6 +346,15 @@ impl App {
                 }
             }
             painted = self.paint_conversation(frame, &prepared);
+            let label_style = parent
+                .and_then(|id| self.backend_registry.owner(id))
+                .or(self.app_server_backend_id)
+                .map(|owner| self.backend_registry.thread_label_style(owner))
+                .unwrap_or_default();
+            let link_pointer =
+                tui_link_position.filter(|_| self.chat_widget.no_modal_or_popup_active());
+            self.transcript_view
+                .paint_document_links(frame.buffer, link_pointer);
             match &self.conversation_frame.sidebar {
                 Some(sidebar::SidebarLayout::Chat(panes)) => {
                     if let Some(companion) = self.side_companions.get_mut(&panes.passive_thread) {
@@ -344,8 +369,30 @@ impl App {
                 }
                 Some(sidebar::SidebarLayout::Panel { sidebar, focus, .. }) => {
                     let focused = *focus == PaneFocus::Sidebar;
+                    if focused {
+                        frame.cursor_position = None;
+                    }
                     let resize_hint = self.pane_resize.map(|_| side_pane::RESIZE_HINT);
-                    if let Some(creation) = self.sidebar().and_then(|pane| pane.creation.as_ref()) {
+                    if let Some(doc) = self
+                        .sidebars
+                        .get_mut(&sidebar_parent)
+                        .and_then(|pane| pane.active_document())
+                    {
+                        let [_, body] = side_pane::tab_and_body(*sidebar);
+                        if let Some(cursor) = doc.paint(
+                            body,
+                            frame.buffer,
+                            sidebar_motion,
+                            &frames,
+                            &self.keymap,
+                            resize_hint,
+                        ) && focused
+                        {
+                            frame.cursor_position = Some(cursor);
+                        }
+                    } else if let Some(creation) =
+                        self.sidebar().and_then(|pane| pane.creation.as_ref())
+                    {
                         use sidebar::CreationState;
                         ratatui::widgets::Clear.render(*sidebar, frame.buffer);
                         let mut body = sidebar.inner(ratatui::layout::Margin::new(1, 1));
@@ -383,6 +430,10 @@ impl App {
                             .wrap(ratatui::widgets::Wrap { trim: false })
                             .render(body, frame.buffer);
                     } else if let Some(pane) = self.sidebar() {
+                        let tabs = crate::sidebar_chooser::ChatTabs {
+                            label_style,
+                            ..pane.chat_tabs()
+                        };
                         let footer = if let Some(hint) = resize_hint {
                             let row = crate::sidebar_chooser::body_row(*sidebar, sidebar.y);
                             crate::sidebar_chooser::resize_hint(hint, row.width)
@@ -391,7 +442,7 @@ impl App {
                                 &self.keymap,
                                 *sidebar,
                                 pane.choice,
-                                pane.chat_tabs(),
+                                tabs,
                                 self.chat_widget.side_chat_creation_state(),
                             )
                             .0
@@ -402,7 +453,7 @@ impl App {
                             *sidebar,
                             frame.buffer,
                             footer,
-                            pane.chat_tabs(),
+                            tabs,
                             pane.choice,
                             &crate::sidebar_chooser::SidebarStyle {
                                 new_chat: self.chat_widget.side_chat_creation_state(),
@@ -413,26 +464,53 @@ impl App {
                                 frames: &frames,
                             },
                         );
-                        let chooser = if focused {
+                    }
+                    if let Some(pane) = self.sidebar()
+                        && (pane.creation.is_none()
+                            || matches!(
+                                pane.visible_content(),
+                                Some(sidebar::SidebarContent::Document(_))
+                            ))
+                    {
+                        let document = matches!(
+                            pane.visible_content(),
+                            Some(sidebar::SidebarContent::Document(_))
+                        );
+                        let chooser = if document {
+                            TabState::Absent
+                        } else if focused {
                             TabState::Active
                         } else {
                             TabState::Inactive
                         };
+                        if document {
+                            ratatui::widgets::Clear
+                                .render(side_pane::tab_and_body(*sidebar)[0], frame.buffer);
+                        }
                         crate::sidebar_chooser::tab_strip(
                             *sidebar,
                             chooser,
-                            TabState::Absent,
-                            pane.chat_tabs(),
-                            hovered_target,
+                            if document && focused {
+                                TabState::Active
+                            } else if document {
+                                TabState::Inactive
+                            } else {
+                                TabState::Absent
+                            },
+                            crate::sidebar_chooser::ChatTabs {
+                                label_style,
+                                ..pane.chat_tabs()
+                            },
+                            pointer
+                                .and_then(|point| pane.chat_tabs().strip().hit(*sidebar, point))
+                                .map(|(target, _)| target),
+                            |id, width| pane.document_title(id, width),
                             frame.buffer,
                         );
                     }
                     frame
                         .image_placements
                         .retain(|image| !sidebar.intersects(image.area));
-                    if focused {
-                        frame.cursor_position = None;
-                    }
                 }
                 None => {}
             }
@@ -443,8 +521,14 @@ impl App {
                     strip,
                     TabState::Absent,
                     chat,
-                    pane.chat_tabs(),
-                    hovered_target,
+                    crate::sidebar_chooser::ChatTabs {
+                        label_style,
+                        ..pane.chat_tabs()
+                    },
+                    pointer
+                        .and_then(|point| pane.chat_tabs().strip().hit(strip, point))
+                        .map(|(target, _)| target),
+                    |id, width| pane.document_title(id, width),
                     frame.buffer,
                 );
             }
@@ -1182,6 +1266,14 @@ impl App {
                 }
             } else if let ViewAction::OpenLink(url) = action {
                 self.open_url_in_browser(url);
+            } else if let ViewAction::OpenDocument(link) = action
+                && let Some(source) = self.current_displayed_thread_id()
+            {
+                self.app_event_tx.send(AppEvent::OpenSidebarDocument {
+                    backend_id: app_server.backend_id(),
+                    source,
+                    link,
+                });
             }
         }
         if was_select_mode && !self.transcript_view.is_select_mode() {

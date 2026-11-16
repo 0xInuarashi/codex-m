@@ -4970,7 +4970,7 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
             ))
             .await?;
         } else {
-            assert!(columns.iter().all(|x| *x == divider - 2));
+            assert!(columns.iter().all(|x| *x == divider - 1));
             // A fresh transcript press cancels a drag whose release was lost.
             for kind in [MouseEventKind::Down(left), MouseEventKind::Up(left)] {
                 boxed_future!(app.handle_tui_event(
@@ -4986,9 +4986,9 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
         }
     }
     // Text preview, graphics guide, and the divider on the protected image row.
-    insta::assert_snapshot!(format!("{previews:?}"), @"[197, 197, 199]");
+    insta::assert_snapshot!(format!("{previews:?}"), @"[198, 198, 199]");
     side_frame(&mut app, &mut tui, wide)?;
-    assert_eq!(divider_at(&tui, 0), 197);
+    assert_eq!(divider_at(&tui, 0), 198);
     let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path)?)?;
     assert_eq!(saved["tui"]["sidebar_width_percent"].as_integer(), Some(34));
 
@@ -5372,6 +5372,38 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     let frame = side_frame(&mut app, &mut tui, even)?;
     let header = frame.lines().next().unwrap().split_once('│').unwrap().1;
     assert_app_snapshot!("side_chat_tabs", header.trim_end());
+    let owner = app
+        .app_server_backend_id
+        .unwrap_or_else(crate::backend_id::BackendId::new);
+    let local_registry = std::mem::replace(
+        &mut app.backend_registry,
+        crate::app::backend_registry::BackendRegistry::new([owner].into()),
+    );
+    assert!(app.backend_registry.observe(owner, parent_thread_id));
+    let frame = side_frame(&mut app, &mut tui, even)?;
+    let header = frame.lines().next().unwrap().split_once('│').unwrap().1;
+    insta::assert_snapshot!(
+        header.split_inclusive('×').take(2).collect::<String>(),
+        @" ☁︎ Investigate …×  ☁︎ Fix cache    ×"
+    );
+    keys!(prefix, chooser_key);
+    let frame = side_frame(&mut app, &mut tui, even)?;
+    let labels = frame
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_once('│').map(|(_, pane)| pane))
+        .filter(|pane| pane.contains("Investigate rendering") || pane.contains("Fix cache"))
+        .map(|pane| pane.trim().trim_start_matches(['›', '○', ' ']))
+        .filter(|pane| pane.starts_with("☁︎"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    insta::assert_snapshot!(labels, @"
+    ☁︎ Investigate rendering
+    ☁︎ Fix cache
+    ");
+    keys!(KeyCode::Enter.into());
+    app.backend_registry = local_registry;
+    side_frame(&mut app, &mut tui, even)?;
     assert_eq!(app.conversation_frame.chat_strip.unwrap().x, sidebar_x);
 
     // At this width only one tab fits. Use the arrow to go back and the wheel to return.
@@ -5379,16 +5411,26 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     let narrow_frame = side_frame(&mut app, &mut tui, narrow)?;
     let header = narrow_frame.lines().next().unwrap();
     insta::assert_snapshot!("side_chat_tab_overflow", header.trim_end());
-    let arrow = header.chars().position(|c| c == '‹').expect("previous tab");
+    let strip = app.conversation_frame.chat_strip.unwrap();
+    let arrow_x = header.chars().position(|c| c == '‹').expect("previous tab") as u16;
+    let buffer = tui.terminal.previous_buffer();
+    let arrow_cell = &buffer[(arrow_x, strip.y)];
+    let add_cell = &buffer[(strip.right() - 3, strip.y)];
+    let idle_style = arrow_cell.style();
+    assert_eq!(idle_style, add_cell.style());
+
+    let hover = mouse(MouseEventKind::Moved, arrow_x, strip.y);
+    boxed_future!(app.handle_tui_event(&mut tui, &mut app_server, hover)).await?;
+    side_frame(&mut app, &mut tui, narrow)?;
+    assert_ne!(
+        tui.terminal.previous_buffer()[(arrow_x, strip.y)].style(),
+        idle_style
+    );
     for (kind, expected) in [
         (MouseEventKind::Down(MouseButton::Left), side_thread_id),
         (MouseEventKind::ScrollDown, sibling),
     ] {
-        let event = mouse(
-            kind,
-            arrow as u16,
-            app.conversation_frame.chat_strip.unwrap().y,
-        );
+        let event = mouse(kind, arrow_x, strip.y);
         boxed_future!(app.handle_tui_event(&mut tui, &mut app_server, event)).await?;
         drain_app_events(&mut app, &mut tui, &mut app_server, &mut app_event_rx).await?;
         assert_eq!(app.current_displayed_thread_id(), Some(expected));
@@ -5402,7 +5444,22 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
     assert!(side_frame(&mut app, &mut tui, even)?.contains(child_row));
     let strip = app.conversation_frame.chat_strip.unwrap();
     let down = MouseEventKind::Down(MouseButton::Left);
-    let click = mouse(down, strip.x + 12, strip.y);
+    let sibling_tab = app
+        .sidebar()
+        .unwrap()
+        .chat_tabs()
+        .strip()
+        .strip_targets(strip)
+        .into_iter()
+        .find_map(|(target, area)| {
+            (target
+                == crate::sidebar_tab_strip::TabTarget::Tab(
+                    crate::sidebar_tab_strip::SidebarTab::Chat(sibling),
+                ))
+            .then_some(area)
+        })
+        .expect("sibling tab");
+    let click = mouse(down, sibling_tab.x, strip.y);
     boxed_future!(app.handle_tui_event(&mut tui, &mut app_server, click)).await?;
     drain_app_events(&mut app, &mut tui, &mut app_server, &mut app_event_rx).await?;
     assert_eq!(app.current_displayed_thread_id(), Some(sibling));
@@ -5486,7 +5543,6 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
         assert_eq!(app.chooser_focus(), expected_focus, "{focus}");
         side_frame(&mut app, &mut tui, even)?;
         let strip = app.conversation_frame.sidebar_tab_strip().unwrap();
-        let chooser = app.conversation_frame.chat_strip.is_none();
         let add = strip.right() - 3;
         let tabs = app
             .sidebar()
@@ -5495,20 +5551,22 @@ async fn handle_start_side_seeds_navigation_before_thread_started() -> Result<()
             .strip()
             .strip_targets(strip);
         let [inactive, selected] = tabs
+            .into_iter()
             .filter_map(|(target, area)| {
                 matches!(target, crate::sidebar_tab_strip::TabTarget::Tab(_)).then_some(area)
             })
             .collect::<Vec<_>>()
             .try_into()
             .expect("both side-chat tabs are visible");
-        assert_eq!(selected.x, inactive.right() + 1);
+        assert_eq!(selected.x, inactive.right() + 2);
+        assert_eq!(inactive.width, selected.width);
         let [inactive, selected] = [inactive, selected].map(|area| area.x + 1);
         for (state, column, row, palette, redraw) in [
             ("rest", selected, strip.y + 1, Some(colors), None),
             ("hover", inactive, strip.y, Some(colors), Some(true)),
             ("fallback", inactive + 1, strip.y, None, Some(false)),
             ("selected", selected, strip.y, Some(colors), Some(true)),
-            ("leave", selected, strip.y + 1, Some(colors), Some(chooser)),
+            ("leave", selected, strip.y + 1, Some(colors), Some(true)),
             ("light rest", selected, strip.y + 1, Some(light), None),
             ("light hover", inactive, strip.y, Some(light), Some(true)),
             ("light add", add, strip.y, Some(light), Some(true)),
@@ -9380,13 +9438,20 @@ async fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_p
     let thread_id = started.session.thread_id;
     app.enqueue_primary_thread_session(started.session, started.turns)
         .await?;
-    let objective = "x".repeat(MAX_THREAD_GOAL_OBJECTIVE_CHARS + 1);
+    let long_paste = "한글".repeat(MAX_THREAD_GOAL_OBJECTIVE_CHARS / 2);
+    let long_placeholder = "[Pasted Content 4000 chars]";
+    let objective = format!("Prefix {long_paste} suffix");
 
     app.set_thread_goal_draft(
         &mut app_server,
         thread_id,
         crate::goal_files::GoalDraft {
-            objective: objective.clone(),
+            objective: format!("Prefix {long_placeholder} suffix"),
+            text_elements: vec![TextElement::new(
+                (7..7 + long_placeholder.len()).into(),
+                Some(long_placeholder.to_string()),
+            )],
+            pending_pastes: vec![(long_placeholder.to_string(), long_paste)],
             ..Default::default()
         },
         crate::app_event::ThreadGoalSetMode::ConfirmIfExists,
@@ -9472,13 +9537,17 @@ async fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_p
         .await?
         .goal
         .expect("replacement goal should be set");
-    let paste_path = goal
-        .objective
-        .strip_prefix("Use pasted text file: ")
-        .and_then(|text| text.strip_suffix(". Read this file before continuing."))
-        .expect("paste file reference");
-    assert_eq!(std::fs::read_to_string(paste_path)?, "hello");
-    let attachment_count = std::fs::read_dir(&attachments_dir)?.count();
+    assert_eq!(goal.objective, "Use hello");
+    assert_eq!(
+        std::fs::read_dir(&attachments_dir)?.count(),
+        attachment_count
+    );
+    app.open_thread_goal_editor(&mut app_server, Some(thread_id))
+        .await;
+    insta::assert_snapshot!(
+        "pasted_goal_editor",
+        render_bottom_popup(&app.chat_widget, /*width*/ 80)
+    );
 
     let stale_paste = (placeholder.to_string(), "hello".to_string());
     app.set_thread_goal_draft(
@@ -9535,11 +9604,19 @@ async fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_p
         &mut app_server,
         thread_id,
         crate::goal_files::GoalDraft {
-            objective: format!("Describe {image_placeholder}"),
-            text_elements: vec![TextElement::new(
-                (9..9 + image_placeholder.len()).into(),
-                Some(image_placeholder.to_string()),
-            )],
+            objective: format!("Describe {placeholder} {image_placeholder}"),
+            text_elements: vec![
+                TextElement::new(
+                    (9..9 + placeholder.len()).into(),
+                    Some(placeholder.to_string()),
+                ),
+                TextElement::new(
+                    (10 + placeholder.len()..10 + placeholder.len() + image_placeholder.len())
+                        .into(),
+                    Some(image_placeholder.to_string()),
+                ),
+            ],
+            pending_pastes: vec![(placeholder.to_string(), "hello".to_string())],
             local_images: vec![crate::bottom_pane::LocalImageAttachment {
                 placeholder: image_placeholder.to_string(),
                 path: image_path,
@@ -9548,7 +9625,6 @@ async fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_p
                 "https://example.com/first.png".to_string(),
                 "https://example.com/second.png".to_string(),
             ],
-            ..Default::default()
         },
         crate::app_event::ThreadGoalSetMode::ReplaceExisting,
     )
@@ -9560,7 +9636,7 @@ async fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_p
         .expect("image goal should be set")
         .objective;
     let copied_image = objective
-        .strip_prefix("Describe image file: ")
+        .strip_prefix("Describe hello image file: ")
         .and_then(|text| text.split_once("\n\n"))
         .map(|(path, _)| path)
         .expect("copied image path");
